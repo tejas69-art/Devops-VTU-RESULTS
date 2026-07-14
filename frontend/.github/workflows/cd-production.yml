@@ -1,0 +1,184 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CD Pipeline — Production Deploy
+# Triggers on GitHub Release published (tag: v*)
+# Requires manual approval via GitHub Environments
+#
+# Required Secrets:
+#   AWS_ACCESS_KEY_ID       — IAM user with ECR + EKS permissions
+#   AWS_SECRET_ACCESS_KEY   — IAM secret
+#   AWS_ACCOUNT_ID          — 12-digit AWS account ID
+#   KUBECONFIG_PRODUCTION   — base64-encoded kubeconfig for production cluster
+#
+# Setup: Create a GitHub Environment called "production" with required reviewers
+#        GitHub → Settings → Environments → production → Required reviewers
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: 🏭 CD — Production Deploy
+
+on:
+  release:
+    types: [published]    # Trigger when a release is published via GitHub UI/CLI
+
+concurrency:
+  group: cd-production
+  cancel-in-progress: false   # Never cancel production deploys
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-south-1.amazonaws.com
+  ECR_REPOSITORY: vtu-results
+  K8S_NAMESPACE: production
+  IMAGE_TAG: ${{ github.ref_name }}   # e.g., "v1.2.3"
+
+jobs:
+
+  # ─── Job 1: Build + Push Production Image ─────────────────────────────────
+  build-push-production:
+    name: 🐳 Build Production Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Docker image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push production image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NEXT_PUBLIC_APP_ENV=production
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Run Trivy on production image (strict)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}'
+          format: 'table'
+          exit-code: '1'      # FAIL the build if CRITICAL vulnerabilities found
+          severity: 'CRITICAL'
+
+  # ─── Job 2: Manual Approval Gate ──────────────────────────────────────────
+  deploy-production:
+    name: 🏭 Deploy to Production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build-push-production
+
+    # This environment requires manual approval from configured reviewers
+    environment:
+      name: production
+      url: https://vtu-results.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_PRODUCTION }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Verify production cluster connection
+        run: kubectl cluster-info
+
+      - name: Record pre-deploy state
+        id: pre-deploy
+        run: |
+          CURRENT_IMAGE=$(kubectl get deployment/vtu-results -n ${{ env.K8S_NAMESPACE }} \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+          echo "previous_image=${CURRENT_IMAGE}" >> $GITHUB_OUTPUT
+          echo "📍 Current production image: ${CURRENT_IMAGE}"
+
+      - name: Deploy to production
+        run: |
+          kubectl set image deployment/vtu-results \
+            vtu-results=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
+            -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Annotate deployment
+        run: |
+          kubectl annotate deployment/vtu-results \
+            kubernetes.io/change-cause="Release ${{ env.IMAGE_TAG }} by ${{ github.actor }} — ${{ github.event.release.name }}" \
+            --overwrite \
+            -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Wait for production rollout
+        run: |
+          kubectl rollout status deployment/vtu-results \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --timeout=600s
+
+      - name: Production health check
+        run: |
+          sleep 20
+          RESPONSE=$(curl -sf "https://vtu-results.example.com/api/health" | jq -r '.status')
+          if [ "$RESPONSE" != "healthy" ]; then
+            echo "❌ Production health check failed: $RESPONSE"
+            exit 1
+          fi
+          echo "✅ Production is healthy after deploy"
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "🚨 Production deploy failed — initiating emergency rollback!"
+          kubectl rollout undo deployment/vtu-results -n ${{ env.K8S_NAMESPACE }}
+          kubectl rollout status deployment/vtu-results -n ${{ env.K8S_NAMESPACE }} --timeout=300s
+          echo "✅ Rollback to ${{ steps.pre-deploy.outputs.previous_image }} complete"
+
+  # ─── Job 3: Post-Deploy Notification ──────────────────────────────────────
+  notify:
+    name: 📣 Notify Deployment
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: always()
+
+    steps:
+      - name: Post deployment summary
+        run: |
+          STATUS="${{ needs.deploy-production.result }}"
+          EMOJI=$([[ "$STATUS" == "success" ]] && echo "🎉" || echo "🚨")
+          echo "${EMOJI} Production deploy ${STATUS}"
+          echo "Version: ${{ env.IMAGE_TAG }}"
+          echo "Released by: ${{ github.actor }}"
+          echo "Release notes: ${{ github.event.release.html_url }}"
+
+          # Uncomment to send to Slack:
+          # curl -X POST -H 'Content-type: application/json' \
+          #   --data "{\"text\":\"${EMOJI} *VTU Results* production deploy *${STATUS}*\nVersion: \`${{ env.IMAGE_TAG }}\`\nBy: ${{ github.actor }}\"}" \
+          #   ${{ secrets.SLACK_WEBHOOK_URL }}

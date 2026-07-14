@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>VTU Scraper — Home</title>
+    <style>
+      :root{
+        --bg:#f6f7fb;
+        --card:#ffffff;
+        --muted:#6b7280;
+        --accent:#0b63d6;
+        --radius:10px;
+        --glass: rgba(18,24,40,0.04);
+      }
+
+      *, *::before, *::after { box-sizing: border-box; }
+      html, body { height: 100%; }
+
+      body {
+        font-family: Inter, "Segoe UI", Arial, sans-serif;
+        background: var(--bg);
+        color: #111;
+        margin: 0;
+        padding: 28px;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+
+      .wrap {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 0 18px;
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid #e6e9ef;
+        border-radius: var(--radius);
+        padding: 22px;
+        box-shadow: 0 6px 18px var(--glass);
+      }
+
+      h1 { margin: 0 0 6px; font-size: 22px; }
+      p.lead { margin: 6px 0 18px; color: var(--muted); line-height: 1.45; }
+
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 260px;
+        gap: 18px;
+        align-items: start;
+        align-content: start;
+      }
+
+      .right { display: flex; flex-direction: column; gap: 12px; }
+
+      .box {
+        padding: 12px;
+        border-radius: 8px;
+        background: #fbfdff;
+        border: 1px solid #eef3ff;
+      }
+
+      pre {
+        background: #0f1724;
+        color: #e6eef8;
+        padding: 12px;
+        border-radius: 6px;
+        overflow: auto;
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      code { background: gray; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+
+      a { color: var(--accent); text-decoration: none; }
+      ul { margin: 8px 0 0 18px; padding: 0; }
+      .note { font-size: 13px; color: var(--muted); margin-top: 10px; }
+
+      .right h3 { margin-top: 0; }
+      .important { color: #b91c1c; font-weight: 600; }
+      footer { margin-top: 18px; font-size: 13px; color: var(--muted); }
+
+      form { display: grid; gap: 8px; }
+      label { font-size: 13px; color: var(--muted); }
+      input[type=text], input[type=url], textarea, select {
+        width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid #e6e9ef; font-size: 14px;
+        background: #fff;
+      }
+
+      .row { display:flex; gap:8px; }
+      button {
+        background: var(--accent); color: white; border: 0; padding: 8px 12px; border-radius: 8px; cursor: pointer;
+      }
+      button.secondary { background: #6b7280; }
+
+      .result-wrap { margin-top: 12px; }
+      .result-meta { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+
+      .controls { display:flex; gap:8px; align-items:center; }
+
+      @media (max-width: 840px) {
+        .grid { grid-template-columns: 1fr; }
+        .right { order: 2; }
+      }
+
+      @media (max-width: 420px) {
+        body { padding: 16px; }
+        .wrap { padding: 0 12px; }
+        .card { padding: 16px; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="wrap">
+      <header class="card" role="banner" aria-label="VTU Scraper header">
+        <h1>VTUHub — Result Fetcher</h1>
+        <p class="lead">Enter your USN, solve the captcha, and get your raw VTU result HTML directly.</p>
+      </header>
+
+      <main class="card" role="main" aria-label="Overview" style="margin-top:18px">
+        <div class="grid">
+          <section>
+            <div class="box" aria-labelledby="single-title">
+              <h3 id="single-title">Single USN</h3>
+              <form id="single-form">
+                <label for="single-index">Index URL</label>
+                <input id="single-index" name="index_url" type="url" placeholder="https://results.vtu.ac.in/JJEcbcs25/index.php" required />
+
+                <label for="single-usn">USN</label>
+                <input id="single-usn" name="usn" type="text" placeholder="" required />
+
+                <div class="row">
+                  <button type="submit">Fetch</button>
+                  <button type="button" id="single-clear" class="secondary">Clear</button>
+                </div>
+
+                <div class="result-wrap" id="single-captcha-wrap" hidden>
+                  <div class="result-meta" id="single-captcha-meta"></div>
+                  <div style="margin:10px 0; display:flex; flex-direction:column; gap:8px">
+                    <img
+                      id="single-captcha-img"
+                      alt="Captcha"
+                      style="max-width:320px; border:1px solid #eef3ff; border-radius:8px; background:#fff;"
+                    />
+
+                    <label for="single-captcha-code">Captcha code</label>
+                    <input id="single-captcha-code" name="captcha_code" type="text" placeholder="Type the code from the image" />
+
+                    <div class="row" style="margin-top:8px">
+                      <button type="button" id="single-verify">Verify</button>
+                      <button type="button" id="single-captcha-cancel" class="secondary">Cancel</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="result-wrap" id="single-result-wrap" hidden>
+                  <div class="result-meta" id="single-meta"></div>
+                  <div style="margin-bottom:8px">
+                    <button type="button" id="single-open">Open in new tab</button>
+                    <button type="button" id="single-download" class="secondary">Download HTML</button>
+                  </div>
+                  <pre id="single-result" style="max-height:360px"></pre>
+                </div>
+              </form>
+            </div>
+
+            <div style="height:18px"></div>
+
+            <!-- Range UI removed: this app supports only /single-post -->
+
+          </section>
+
+          <aside class="right" role="complementary" aria-label="Instructions">
+            <div class="box" aria-labelledby="status-title">
+              <h3 id="status-title">How it works</h3>
+              <ul>
+                <li><strong>Step 1:</strong> Enter your USN and click Fetch.</li>
+                <li><strong>Step 2:</strong> View the Captcha image returned by VTU.</li>
+                <li><strong>Step 3:</strong> Type the Captcha manually and Verify.</li>
+                <li><strong>Step 4:</strong> Get the raw HTML data directly!</li>
+              </ul>
+            </div>
+            <div class="box" style="margin-top: 18px;">
+              <h3>API Access</h3>
+              <p class="note"><a href="/docs">Swagger UI Interface</a></p>
+            </div>
+          </aside>
+        </div>
+
+        <p class="note" style="margin-top:18px">Endpoints return HTML. Use Swagger to inspect full output.</p>
+      </main>
+
+      <footer class="card" role="contentinfo" style="margin-top:18px">
+        <p>© VTUHub — VTU Scraper. Internal use only.</p>
+      </footer>
+    </div>
+
+    <script>
+      function safeText(html) {
+        // keep as text for preview to avoid execution
+        return html;
+      }
+
+      async function postJson(url, body) {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        if (!res.ok) {
+          const txt = await res.text().catch(()=>null);
+          throw new Error(`HTTP ${res.status}: ${txt || res.statusText}`);
+        }
+        const ct = res.headers.get('content-type') || '';
+        if (ct.includes('application/json')) return res.json();
+        return res.text();
+      }
+
+      // Single form
+      const singleForm = document.getElementById('single-form');
+      const singleResultWrap = document.getElementById('single-result-wrap');
+      const singleResult = document.getElementById('single-result');
+      const singleMeta = document.getElementById('single-meta');
+      const singleOpen = document.getElementById('single-open');
+      const singleDownload = document.getElementById('single-download');
+      const singleCaptchaWrap = document.getElementById('single-captcha-wrap');
+      const singleCaptchaMeta = document.getElementById('single-captcha-meta');
+      const singleCaptchaImg = document.getElementById('single-captcha-img');
+      const singleCaptchaCode = document.getElementById('single-captcha-code');
+      const singleVerifyBtn = document.getElementById('single-verify');
+      const singleCaptchaCancel = document.getElementById('single-captcha-cancel');
+
+      let singleSession = {
+        token: null,
+        cookies: null,
+        indexUrl: null,
+        usn: null,
+      };
+
+      singleForm.addEventListener('submit', async (e)=>{
+        e.preventDefault();
+        const index = document.getElementById('single-index').value.trim();
+        const usn = document.getElementById('single-usn').value.trim();
+        singleResultWrap.hidden = true;
+        singleCaptchaWrap.hidden = true;
+        singleMeta.textContent = 'Fetching...';
+        singleResult.textContent = '';
+        try {
+          const data = await postJson('/single-post', { index_url: index, usn });
+
+          if (data.stage === 'captcha') {
+            singleSession.token = data.token || null;
+            singleSession.cookies = data.cookies || null;
+            singleSession.indexUrl = index;
+            singleSession.usn = usn;
+
+            singleCaptchaImg.src = data.captcha_image_data_url;
+            singleCaptchaMeta.textContent = 'Captcha received. Enter the code and press Verify.';
+            singleCaptchaCode.value = '';
+            singleCaptchaWrap.hidden = false;
+            singleMeta.textContent = '';
+            return;
+          }
+
+          if (data.stage === 'result') {
+            const html = data.html || '';
+            singleResult.textContent = html;
+            singleMeta.textContent = `Fetched ${html.length} bytes`;
+            singleResultWrap.hidden = false;
+            singleCaptchaWrap.hidden = true;
+
+            singleOpen.onclick = ()=>{
+              const blob = new Blob([html], { type: 'text/html' });
+              const url = URL.createObjectURL(blob);
+              window.open(url, '_blank');
+              setTimeout(()=>URL.revokeObjectURL(url), 60000);
+            };
+
+            singleDownload.onclick = ()=>{
+              const blob = new Blob([html], { type: 'text/html' });
+              const a = document.createElement('a');
+              a.href = URL.createObjectURL(blob);
+              a.download = `${usn || 'result'}.html`;
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              setTimeout(()=>URL.revokeObjectURL(a.href), 60000);
+            };
+
+            return;
+          }
+
+          singleMeta.textContent = 'Unexpected server response: stage=' + data.stage;
+
+        } catch (err) {
+          singleMeta.textContent = 'Error: ' + err.message;
+          singleResult.textContent = '';
+          singleResultWrap.hidden = false;
+        }
+      });
+
+      singleVerifyBtn.addEventListener('click', async ()=>{
+        const captchaValue = (singleCaptchaCode.value || '').trim();
+        if (!captchaValue) {
+          singleCaptchaMeta.textContent = 'Please enter captcha code.';
+          return;
+        }
+
+        if (!singleSession.token || !singleSession.cookies) {
+          singleCaptchaMeta.textContent = 'Captcha session expired. Fetch captcha again.';
+          return;
+        }
+
+        singleCaptchaMeta.textContent = 'Verifying...';
+        singleResultWrap.hidden = true;
+
+        try {
+          const data = await postJson('/single-post', {
+            index_url: singleSession.indexUrl,
+            usn: singleSession.usn,
+            captcha_code: captchaValue,
+            token: singleSession.token,
+            cookies: singleSession.cookies
+          });
+
+          if (data.stage !== 'result') {
+            throw new Error('Unexpected server response stage: ' + data.stage);
+          }
+
+          const html = data.html || '';
+          singleResult.textContent = html;
+          singleMeta.textContent = `Fetched ${html.length} bytes`;
+          singleResultWrap.hidden = false;
+          singleCaptchaWrap.hidden = true;
+
+          singleOpen.onclick = ()=>{
+            const blob = new Blob([html], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+            window.open(url, '_blank');
+            setTimeout(()=>URL.revokeObjectURL(url), 60000);
+          };
+
+          singleDownload.onclick = ()=>{
+            const blob = new Blob([html], { type: 'text/html' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `${singleSession.usn || 'result'}.html`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(()=>URL.revokeObjectURL(a.href), 60000);
+          };
+
+        } catch (err) {
+          singleCaptchaMeta.textContent = 'Error: ' + err.message;
+        }
+      });
+
+      singleCaptchaCancel.addEventListener('click', ()=>{
+        singleCaptchaCode.value = '';
+        singleCaptchaMeta.textContent = '';
+        singleCaptchaWrap.hidden = true;
+      });
+
+      document.getElementById('single-clear').addEventListener('click', ()=>{
+        document.getElementById('single-index').value = '';
+        document.getElementById('single-usn').value = '';
+        singleCaptchaCode.value = '';
+        singleSession.token = null;
+        singleSession.cookies = null;
+        singleSession.indexUrl = null;
+        singleSession.usn = null;
+        singleResultWrap.hidden = true;
+        singleCaptchaWrap.hidden = true;
+        singleCaptchaMeta.textContent = '';
+        singleCaptchaImg.src = '';
+      });
+
+      // Range UI removed.
+    </script>
+  </body>
+</html>

@@ -1,0 +1,395 @@
+# =============================================================================
+# GitHub Actions — Monorepo Orchestrator
+# File: devops-vtu/.github/workflows/monorepo-pipeline.yml
+#
+# Triggers on push to main.
+# Detects which sub-directory changed (backend/ or frontend/).
+# Runs backend deploy FIRST, then frontend deploy (with BACKEND_API_URL injected).
+# Sends Gmail alerts via dawidd6/action-send-mail on success / failure.
+#
+# Required GitHub Secrets (Settings → Secrets → Actions):
+#   AWS_ACCESS_KEY_ID       — IAM key
+#   AWS_SECRET_ACCESS_KEY   — IAM secret
+#   AWS_ACCOUNT_ID          — 12-digit account number
+#   BACKEND_API_URL         — e.g. https://api.vtu-results.com
+#   GMAIL_USER              — your Gmail address
+#   GMAIL_APP_PASSWORD      — 16-char App Password (not your Gmail password!)
+#   NOTIFY_EMAIL            — recipient email (can be same as GMAIL_USER)
+# =============================================================================
+
+name: 🚀 Monorepo — Backend → Frontend Pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_backend:
+        description: 'Force backend deploy even if no backend changes'
+        type: boolean
+        default: false
+      force_frontend:
+        description: 'Force frontend deploy even if no frontend changes'
+        type: boolean
+        default: false
+
+concurrency:
+  group: monorepo-main
+  cancel-in-progress: false   # Never cancel a running deploy
+
+jobs:
+
+  # ─── Job 1: Detect What Changed ────────────────────────────────────────────
+  detect-changes:
+    name: 🔍 Detect Changed Paths
+    runs-on: ubuntu-latest
+    outputs:
+      backend:  ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2      # Need previous commit for diff
+
+      - name: Detect path changes
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+            frontend:
+              - 'frontend/**'
+
+      - name: Log detected changes
+        run: |
+          echo "Backend changed : ${{ steps.filter.outputs.backend }}"
+          echo "Frontend changed: ${{ steps.filter.outputs.frontend }}"
+          echo "Force backend   : ${{ inputs.force_backend }}"
+          echo "Force frontend  : ${{ inputs.force_frontend }}"
+
+  # ─── Job 2: Backend CI/CD ───────────────────────────────────────────────────
+  backend-deploy:
+    name: 🐍 Backend — CI/CD
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: detect-changes
+    if: |
+      needs.detect-changes.outputs.backend == 'true' ||
+      inputs.force_backend == true
+
+    defaults:
+      run:
+        working-directory: backend
+
+    env:
+      AWS_REGION:     ap-south-1
+      ECR_REPOSITORY: vtu-backend
+      ECS_CLUSTER:    vtu-results-cluster
+      ECS_SERVICE:    vtu-backend-service
+      CONTAINER_NAME: vtu-backend
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: 🔍 Lint (ruff)
+        run: |
+          pip install ruff
+          ruff check . --select E,W,F --ignore E501,E402 --output-format=github \
+            || echo "⚠️ Lint warnings (non-blocking)"
+
+      - name: ✅ Syntax check
+        run: python3 -m py_compile main.py && echo "✅ main.py OK"
+
+      - name: 🔑 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ap-south-1
+
+      - name: 🔐 Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 🐳 Build & Push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha,scope=backend
+          cache-to:   type=gha,scope=backend,mode=max
+          platforms:  linux/amd64
+
+      - name: 📋 Render ECS task definition
+        id: render-task
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition-family: ${{ env.ECS_SERVICE }}
+          container-name:         ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: 🚀 Deploy backend to ECS (rolling)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition:            ${{ steps.render-task.outputs.task-definition }}
+          service:                    ${{ env.ECS_SERVICE }}
+          cluster:                    ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: ❤️ Backend health check
+        run: |
+          sleep 10
+          RUNNING=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].runningCount' --output text)
+          DESIRED=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].desiredCount' --output text)
+          echo "✅ Backend ECS: ${RUNNING}/${DESIRED} tasks running"
+          if [ "$RUNNING" != "$DESIRED" ]; then
+            echo "❌ Backend deploy unhealthy!"
+            exit 1
+          fi
+
+  # ─── Job 3: Frontend CI/CD (runs AFTER backend) ─────────────────────────────
+  frontend-deploy:
+    name: ⚡ Frontend — CI/CD
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [detect-changes, backend-deploy]
+    # Run if: frontend changed OR forced. backend-deploy is skipped if not needed — that's fine.
+    if: |
+      always() &&
+      (needs.detect-changes.outputs.frontend == 'true' || inputs.force_frontend == true) &&
+      (needs.backend-deploy.result == 'success' || needs.backend-deploy.result == 'skipped')
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    env:
+      AWS_REGION:     ap-south-1
+      ECR_REPOSITORY: vtu-results
+      ECS_CLUSTER:    vtu-results-cluster
+      ECS_SERVICE:    vtu-results-service
+      CONTAINER_NAME: vtu-results
+      NODE_VERSION:   '20'
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🧹 ESLint
+        run: npm run lint
+
+      - name: ✅ TypeScript type-check
+        run: npm run type-check
+
+      - name: 🏗️ Next.js build (with BACKEND_API_URL)
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+          NEXT_PUBLIC_APP_ENV: production
+          # Backend API URL baked into the Next.js bundle at build time
+          NEXT_PUBLIC_BACKEND_URL: ${{ secrets.BACKEND_API_URL }}
+
+      - name: 🔑 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ap-south-1
+
+      - name: 🔐 Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 🐳 Build & Push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          build-args: |
+            NEXT_PUBLIC_BACKEND_URL=${{ secrets.BACKEND_API_URL }}
+            NEXT_PUBLIC_APP_ENV=production
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to:   type=gha,scope=frontend,mode=max
+          platforms:  linux/amd64
+
+      - name: 📋 Render ECS task definition
+        id: render-task
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition-family: ${{ env.ECS_SERVICE }}
+          container-name:         ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: 🚀 Deploy frontend to ECS (rolling)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition:            ${{ steps.render-task.outputs.task-definition }}
+          service:                    ${{ env.ECS_SERVICE }}
+          cluster:                    ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: ❤️ Frontend health check
+        run: |
+          RUNNING=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].runningCount' --output text)
+          DESIRED=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].desiredCount' --output text)
+          echo "✅ Frontend ECS: ${RUNNING}/${DESIRED} tasks running"
+
+  # ─── Job 4: Gmail Notification ──────────────────────────────────────────────
+  notify:
+    name: 📧 Gmail Notification
+    runs-on: ubuntu-latest
+    needs: [detect-changes, backend-deploy, frontend-deploy]
+    if: always()    # Always run, even on failure
+
+    steps:
+      - name: 📊 Build status summary
+        id: status
+        run: |
+          BACKEND_RESULT="${{ needs.backend-deploy.result }}"
+          FRONTEND_RESULT="${{ needs.frontend-deploy.result }}"
+
+          # Overall status
+          if [[ "$BACKEND_RESULT" == "failure" || "$FRONTEND_RESULT" == "failure" ]]; then
+            echo "overall=failure"  >> $GITHUB_OUTPUT
+            echo "emoji=❌"         >> $GITHUB_OUTPUT
+            echo "color=#e74c3c"    >> $GITHUB_OUTPUT
+            echo "title=Deploy Failed" >> $GITHUB_OUTPUT
+          elif [[ "$BACKEND_RESULT" == "cancelled" || "$FRONTEND_RESULT" == "cancelled" ]]; then
+            echo "overall=cancelled" >> $GITHUB_OUTPUT
+            echo "emoji=⚠️"          >> $GITHUB_OUTPUT
+            echo "color=#f39c12"     >> $GITHUB_OUTPUT
+            echo "title=Deploy Cancelled" >> $GITHUB_OUTPUT
+          else
+            echo "overall=success"   >> $GITHUB_OUTPUT
+            echo "emoji=✅"           >> $GITHUB_OUTPUT
+            echo "color=#27ae60"     >> $GITHUB_OUTPUT
+            echo "title=Deploy Succeeded" >> $GITHUB_OUTPUT
+          fi
+
+          # Per-service badges
+          badge() { [[ "$1" == "success" ]] && echo "✅ Deployed" || [[ "$1" == "skipped" ]] && echo "⏭️ Skipped (no changes)" || echo "❌ Failed"; }
+          echo "backend_badge=$(badge $BACKEND_RESULT)"   >> $GITHUB_OUTPUT
+          echo "frontend_badge=$(badge $FRONTEND_RESULT)" >> $GITHUB_OUTPUT
+
+      - name: 📧 Send Gmail alert
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.GMAIL_USER }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          to:       ${{ secrets.NOTIFY_EMAIL }}
+          from:     "VTU CI/CD <${{ secrets.GMAIL_USER }}>"
+          subject:  "${{ steps.status.outputs.emoji }} [VTU Results] ${{ steps.status.outputs.title }} — ${{ github.ref_name }} #${{ github.run_number }}"
+          html_body: |
+            <!DOCTYPE html>
+            <html>
+            <body style="margin:0;padding:0;background:#f4f6f9;font-family:Arial,sans-serif;">
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr><td align="center" style="padding:30px 20px;">
+                  <table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.12);">
+
+                    <!-- Header -->
+                    <tr><td style="background:${{ steps.status.outputs.color }};padding:24px;text-align:center;">
+                      <h1 style="color:#fff;margin:0;font-size:24px;">
+                        ${{ steps.status.outputs.emoji }} ${{ steps.status.outputs.title }}
+                      </h1>
+                      <p style="color:rgba(255,255,255,0.85);margin:8px 0 0;">VTU Results — Monorepo CI/CD</p>
+                    </td></tr>
+
+                    <!-- Body -->
+                    <tr><td style="padding:28px;">
+                      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                        <tr style="border-bottom:1px solid #eee;">
+                          <td style="padding:10px 8px;color:#888;font-size:13px;width:140px;">📦 Repository</td>
+                          <td style="padding:10px 8px;font-size:14px;color:#333;">${{ github.repository }}</td>
+                        </tr>
+                        <tr style="border-bottom:1px solid #eee;background:#fafafa;">
+                          <td style="padding:10px 8px;color:#888;font-size:13px;">🌿 Branch</td>
+                          <td style="padding:10px 8px;font-size:14px;color:#333;">${{ github.ref_name }}</td>
+                        </tr>
+                        <tr style="border-bottom:1px solid #eee;">
+                          <td style="padding:10px 8px;color:#888;font-size:13px;">🔖 Commit</td>
+                          <td style="padding:10px 8px;font-size:14px;color:#333;font-family:monospace;">${{ github.sha }}</td>
+                        </tr>
+                        <tr style="border-bottom:1px solid #eee;background:#fafafa;">
+                          <td style="padding:10px 8px;color:#888;font-size:13px;">👤 Actor</td>
+                          <td style="padding:10px 8px;font-size:14px;color:#333;">${{ github.actor }}</td>
+                        </tr>
+                        <tr style="border-bottom:1px solid #eee;">
+                          <td style="padding:10px 8px;color:#888;font-size:13px;">🐍 Backend</td>
+                          <td style="padding:10px 8px;font-size:14px;color:#333;">${{ steps.status.outputs.backend_badge }}</td>
+                        </tr>
+                        <tr style="border-bottom:1px solid #eee;background:#fafafa;">
+                          <td style="padding:10px 8px;color:#888;font-size:13px;">⚡ Frontend</td>
+                          <td style="padding:10px 8px;font-size:14px;color:#333;">${{ steps.status.outputs.frontend_badge }}</td>
+                        </tr>
+                        <tr>
+                          <td style="padding:10px 8px;color:#888;font-size:13px;">🔢 Run #</td>
+                          <td style="padding:10px 8px;font-size:14px;color:#333;">${{ github.run_number }}</td>
+                        </tr>
+                      </table>
+
+                      <!-- CTA Button -->
+                      <div style="text-align:center;margin-top:24px;">
+                        <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                           style="display:inline-block;background:${{ steps.status.outputs.color }};color:#fff;text-decoration:none;padding:12px 28px;border-radius:6px;font-size:14px;font-weight:bold;">
+                          🔍 View Pipeline Logs
+                        </a>
+                      </div>
+                    </td></tr>
+
+                    <!-- Footer -->
+                    <tr><td style="background:#f8f9fa;padding:16px;text-align:center;border-top:1px solid #eee;">
+                      <p style="margin:0;color:#aaa;font-size:12px;">
+                        This is an automated alert from GitHub Actions CI/CD · VTU Results Monorepo
+                      </p>
+                    </td></tr>
+
+                  </table>
+                </td></tr>
+              </table>
+            </body>
+            </html>

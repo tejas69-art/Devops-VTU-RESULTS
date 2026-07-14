@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Ingress — AWS Application Load Balancer (ALB)
+# Managed by the AWS Load Balancer Controller (Helm-installed)
+# Handles TLS termination, path-based routing, and health checks
+#
+# Prerequisites:
+#   - AWS Load Balancer Controller installed (via Terraform Helm release)
+#   - ACM certificate for your domain
+#   - Route53 record pointing to ALB DNS
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vtu-results-ingress
+  namespace: production
+  annotations:
+    # ── ALB Controller Annotations ──────────────────────────────────────────
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+
+    # ── TLS / HTTPS ─────────────────────────────────────────────────────────
+    # Replace with your ACM certificate ARN
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:ap-south-1:<ACCOUNT_ID>:certificate/<CERT_ID>"
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+
+    # ── Health Check ─────────────────────────────────────────────────────────
+    alb.ingress.kubernetes.io/healthcheck-path: /api/health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "10"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+
+    # ── Security Headers ─────────────────────────────────────────────────────
+    alb.ingress.kubernetes.io/wafv2-acl-arn: ""  # Add WAF ARN for production
+
+    # ── Load Balancer Attributes ─────────────────────────────────────────────
+    alb.ingress.kubernetes.io/load-balancer-attributes: >
+      idle_timeout.timeout_seconds=60,
+      routing.http2.enabled=true,
+      access_logs.s3.enabled=false
+
+spec:
+  rules:
+    - host: vtu-results.example.com    # Replace with your actual domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vtu-results-svc
+                port:
+                  name: http

@@ -1,0 +1,235 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Demo Deploy — GitHub Actions CI/CD Pipeline
+# Triggers on push to main branch
+#
+# Stages:
+#   1. Lint + Type Check
+#   2. Build Next.js
+#   3. Docker Build + Push to ECR
+#   4. Deploy to ECS Fargate (rolling update)
+#   5. Health Check
+#
+# Required GitHub Secrets (Settings → Secrets and Variables → Actions):
+#   AWS_ACCESS_KEY_ID          — IAM user access key
+#   AWS_SECRET_ACCESS_KEY      — IAM user secret
+#   AWS_ACCOUNT_ID             — 12-digit AWS account number
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: 🚀 Demo — CI/CD to AWS ECS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:    # Allow manual trigger from GitHub UI
+
+concurrency:
+  group: demo-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION:       ap-south-1
+  ECR_REPOSITORY:   vtu-results
+  ECS_CLUSTER:      vtu-results-cluster
+  ECS_SERVICE:      vtu-results-service
+  CONTAINER_NAME:   vtu-results
+  IMAGE_TAG:        ${{ github.sha }}
+
+jobs:
+
+  # ─── Job 1: CI (Lint + Type Check + Build) ──────────────────────────────────
+  ci:
+    name: 🔍 CI — Lint, Typecheck & Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🧹 ESLint
+        run: npm run lint
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+
+      - name: ✅ TypeScript check
+        run: npm run type-check
+
+      - name: 🏗️ Build Next.js
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+          NEXT_PUBLIC_APP_ENV: production
+
+  # ─── Job 2: Build Docker Image + Push to ECR ───────────────────────────────
+  build-push:
+    name: 🐳 Docker Build → ECR
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: ci
+
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔑 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: 🔐 Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 🏷️ Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+
+      - name: 🔧 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🐳 Build & push image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NEXT_PUBLIC_APP_ENV=production
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+          platforms:  linux/amd64
+
+      - name: 📋 Print image details
+        run: |
+          echo "✅ Image pushed to ECR:"
+          echo "   Registry : ${{ steps.login-ecr.outputs.registry }}"
+          echo "   Repo     : ${{ env.ECR_REPOSITORY }}"
+          echo "   Tags     : ${{ steps.meta.outputs.tags }}"
+          echo "   Digest   : ${{ steps.build.outputs.digest }}"
+
+  # ─── Job 3: Deploy to ECS Fargate ──────────────────────────────────────────
+  deploy:
+    name: 🚀 Deploy → ECS Fargate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build-push
+
+    steps:
+      - name: 🔑 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: 🔐 Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 📋 Fetch current task definition
+        id: task-def
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }} \
+            --query taskDefinition \
+            --output json > task-definition.json
+          echo "✅ Task definition fetched"
+          cat task-definition.json | jq '.family, .revision'
+
+      - name: 🔄 Render new task definition with updated image
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition:  task-definition.json
+          container-name:   ${{ env.CONTAINER_NAME }}
+          image: >
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: 🚀 Deploy to ECS (rolling update)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition:    ${{ steps.render-task-def.outputs.task-definition }}
+          service:            ${{ env.ECS_SERVICE }}
+          cluster:            ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: 📣 Print deploy summary
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════╗"
+          echo "║  ✅ DEPLOY SUCCEEDED                     ║"
+          echo "║  Commit : ${{ github.sha }}"
+          echo "║  Actor  : ${{ github.actor }}"
+          echo "║  Branch : ${{ github.ref_name }}"
+          echo "║  Service: ${{ env.ECS_SERVICE }}"
+          echo "╚══════════════════════════════════════════╝"
+
+  # ─── Job 4: Health Check ────────────────────────────────────────────────────
+  health-check:
+    name: ❤️ Health Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: deploy
+
+    steps:
+      - name: 🔑 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: 🌐 Check ECS service health
+        run: |
+          echo "🔍 Fetching ECS service status..."
+          aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'services[0].{Status:status,Running:runningCount,Desired:desiredCount,Pending:pendingCount}' \
+            --output table
+
+          RUNNING=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'services[0].runningCount' \
+            --output text)
+
+          DESIRED=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'services[0].desiredCount' \
+            --output text)
+
+          if [ "$RUNNING" -eq "$DESIRED" ]; then
+            echo "✅ All $RUNNING/$DESIRED tasks running — deployment healthy!"
+          else
+            echo "⚠️ Running: $RUNNING / Desired: $DESIRED — still stabilising"
+          fi

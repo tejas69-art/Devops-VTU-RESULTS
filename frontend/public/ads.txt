@@ -1,0 +1,5 @@
+# IMPORTANT: Replace 'pub-0000000000000000' with your actual AdSense Publisher ID
+# Format: google.com, pub-XXXXXXXXXXXXXXXX, DIRECT, f08c47fec0942fa0
+# Get your Publisher ID from: https://www.google.com/adsense/
+
+google.com, pub-9265775220371092, DIRECT, f08c47fec0942fa0

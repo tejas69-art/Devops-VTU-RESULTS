@@ -1,0 +1,254 @@
+# =============================================================================
+# GitHub Actions — Frontend CI/CD (reusable workflow)
+# File: frontend/.github/workflows/frontend-ci-cd.yml
+#
+# This workflow is called BY the monorepo orchestrator.
+# It can also be triggered directly on push to main (frontend/** changed).
+#
+# Key: accepts `backend_url` as an input — baked into Next.js at build time.
+# =============================================================================
+
+name: ⚡ Frontend — CI/CD
+
+on:
+  # Called by monorepo orchestrator (passes backend_url)
+  workflow_call:
+    inputs:
+      backend_url:
+        description: 'Backend API base URL to bake into the Next.js build'
+        type: string
+        required: false
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      BACKEND_API_URL:
+        required: false    # Fallback if input not provided
+      GMAIL_USER:
+        required: false
+      GMAIL_APP_PASSWORD:
+        required: false
+      NOTIFY_EMAIL:
+        required: false
+
+  # Also runs standalone on direct push (e.g. frontend-only changes)
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-ci-cd.yml'
+
+  pull_request:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+
+concurrency:
+  group: frontend-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  AWS_REGION:     ap-south-1
+  ECR_REPOSITORY: vtu-results
+  ECS_CLUSTER:    vtu-results-cluster
+  ECS_SERVICE:    vtu-results-service
+  CONTAINER_NAME: vtu-results
+  NODE_VERSION:   '20'
+  # Resolve backend URL: prefer workflow_call input, fall back to secret
+  BACKEND_URL:    ${{ inputs.backend_url || secrets.BACKEND_API_URL || 'http://localhost:8000' }}
+
+defaults:
+  run:
+    working-directory: frontend
+
+jobs:
+
+  # ─── Job 1: CI — Lint + Type Check ─────────────────────────────────────────
+  ci:
+    name: 🧹 Lint & Type Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🧹 ESLint
+        run: npm run lint
+
+      - name: ✅ TypeScript type-check
+        run: npm run type-check
+
+      - name: 🏗️ Validate build (PR only)
+        if: github.event_name == 'pull_request'
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+          NEXT_PUBLIC_APP_ENV: ci
+          NEXT_PUBLIC_BACKEND_URL: ${{ env.BACKEND_URL }}
+
+  # ─── Job 2: Build + Push to ECR (main branch only) ─────────────────────────
+  build-push:
+    name: 🐳 Docker Build → ECR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+
+    outputs:
+      image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🔑 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: 🔐 Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 🔧 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🐳 Build & Push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          # ── KEY: Backend URL baked into image at build time ──────────────────
+          build-args: |
+            NEXT_PUBLIC_BACKEND_URL=${{ env.BACKEND_URL }}
+            NEXT_PUBLIC_APP_ENV=production
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to:   type=gha,scope=frontend,mode=max
+          platforms:  linux/amd64
+
+      - name: 📋 Print image info
+        run: |
+          echo "✅ Frontend image pushed:"
+          echo "   ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          echo "   BACKEND_URL baked: ${{ env.BACKEND_URL }}"
+
+  # ─── Job 3: Deploy to ECS Fargate ──────────────────────────────────────────
+  deploy:
+    name: 🚀 Deploy Frontend → ECS
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build-push
+
+    steps:
+      - name: 🔑 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: 🔐 Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 📋 Render new ECS task definition
+        id: render-task
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition-family: ${{ env.ECS_SERVICE }}
+          container-name:         ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: 🚀 Rolling deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition:            ${{ steps.render-task.outputs.task-definition }}
+          service:                    ${{ env.ECS_SERVICE }}
+          cluster:                    ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: ❤️ Health check
+        run: |
+          RUNNING=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].runningCount' --output text)
+          DESIRED=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].desiredCount' --output text)
+          echo "✅ Frontend ECS: ${RUNNING}/${DESIRED} tasks running"
+          if [ "$RUNNING" != "$DESIRED" ]; then exit 1; fi
+
+  # ─── Job 4: Gmail Notification (standalone runs only) ──────────────────────
+  notify:
+    name: 📧 Gmail Alert
+    runs-on: ubuntu-latest
+    needs: [ci, build-push, deploy]
+    if: |
+      always() &&
+      github.event_name != 'workflow_call'   # Monorepo orchestrator handles notification
+
+    steps:
+      - name: 📊 Compute status
+        id: status
+        run: |
+          if [[ "${{ needs.deploy.result }}" == "success" ]]; then
+            echo "emoji=✅"        >> $GITHUB_OUTPUT
+            echo "color=#27ae60"  >> $GITHUB_OUTPUT
+            echo "title=Frontend Deploy Succeeded" >> $GITHUB_OUTPUT
+          else
+            echo "emoji=❌"        >> $GITHUB_OUTPUT
+            echo "color=#e74c3c"  >> $GITHUB_OUTPUT
+            echo "title=Frontend Deploy Failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 📧 Send Gmail
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.GMAIL_USER }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          to:       ${{ secrets.NOTIFY_EMAIL }}
+          from:     "VTU CI/CD <${{ secrets.GMAIL_USER }}>"
+          subject:  "${{ steps.status.outputs.emoji }} [VTU Frontend] ${{ steps.status.outputs.title }} — #${{ github.run_number }}"
+          html_body: |
+            <html><body style="font-family:Arial,sans-serif;padding:20px;background:#f4f6f9;">
+            <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+              <div style="background:${{ steps.status.outputs.color }};padding:20px;text-align:center;">
+                <h2 style="color:#fff;margin:0;">${{ steps.status.outputs.emoji }} ${{ steps.status.outputs.title }}</h2>
+              </div>
+              <div style="padding:20px;">
+                <p><strong>Branch:</strong> ${{ github.ref_name }}<br>
+                <strong>Commit:</strong> <code>${{ github.sha }}</code><br>
+                <strong>Backend URL used:</strong> <code>${{ env.BACKEND_URL }}</code><br>
+                <strong>Run:</strong> #${{ github.run_number }}</p>
+                <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                   style="background:${{ steps.status.outputs.color }};color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;display:inline-block;margin-top:12px;">
+                  View Logs
+                </a>
+              </div>
+            </div></body></html>

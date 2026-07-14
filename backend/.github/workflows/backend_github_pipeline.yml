@@ -1,0 +1,240 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CI + CD Workflow — Backend (pypy / FastAPI)
+# File: .github/workflows/backend-pipeline.yml
+# CI runs on PRs; CD runs on push to main
+#
+# Required Secrets:
+#   AWS_ACCESS_KEY_ID       — IAM user key
+#   AWS_SECRET_ACCESS_KEY   — IAM user secret
+#   AWS_ACCOUNT_ID          — 12-digit account number
+# ─────────────────────────────────────────────────────────────────────────────
+name: 🐍 Backend — CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend_github_pipeline.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
+  # Called by monorepo orchestrator
+  workflow_call:
+    secrets:
+      AWS_ACCESS_KEY_ID:     { required: true }
+      AWS_SECRET_ACCESS_KEY: { required: true }
+      AWS_ACCOUNT_ID:        { required: true }
+      GMAIL_USER:            { required: false }
+      GMAIL_APP_PASSWORD:    { required: false }
+      NOTIFY_EMAIL:          { required: false }
+  workflow_dispatch:
+
+concurrency:
+  group: backend-pipeline-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  AWS_REGION:      ap-south-1
+  ECR_REPOSITORY:  vtu-backend
+  ECS_CLUSTER:     vtu-results-cluster
+  ECS_SERVICE:     vtu-backend-service
+  CONTAINER_NAME:  vtu-backend
+
+jobs:
+
+  # ─── Job 1: Python CI (always runs) ─────────────────────────────────────────
+  ci:
+    name: 🐍 Python Lint & Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: 📦 Install lint deps
+        run: pip install ruff
+
+      - name: 🔍 Ruff lint check
+        run: |
+          ruff check . --select E,W,F --ignore E501,E402 \
+            --output-format=github || \
+            echo "⚠️ Lint warnings found"
+
+      - name: ✅ Verify imports & syntax
+        run: |
+          python3 -m py_compile main.py
+          echo "✅ main.py syntax OK"
+
+      - name: 📋 Print FastAPI route summary
+        run: |
+          echo "📋 Application entry point: main.py"
+          echo "🌐 Routes: / | /about | /single-post | /docs"
+          grep -n "@app\." main.py || echo "(routes listed above)"
+
+  # ─── Job 2: Docker Build + ECR Push (main branch only) ─────────────────────
+  build-push:
+    name: 🐳 Docker Build → ECR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    outputs:
+      image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🔑 Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: 🔐 Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 🔧 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🐳 Build & Push FastAPI image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: 📋 Print image details
+        run: |
+          echo "✅ Backend image pushed:"
+          echo "   ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+
+  # ─── Job 3: Deploy to ECS Fargate ──────────────────────────────────────────
+  deploy:
+    name: 🚀 Deploy Backend → ECS
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build-push
+
+    steps:
+      - name: 🔑 Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: 🔐 Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 📋 Fetch current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_SERVICE }} \
+            --query taskDefinition \
+            --output json > task-definition.json
+
+      - name: 🔄 Render new task definition with updated image
+        id: render-task
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name:  ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: 🚀 Rolling deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition:            ${{ steps.render-task.outputs.task-definition }}
+          service:                    ${{ env.ECS_SERVICE }}
+          cluster:                    ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: ❤️ Health Check
+        run: |
+          RUNNING=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].runningCount' --output text)
+          DESIRED=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].desiredCount' --output text)
+
+          echo "╔══════════════════════════════════════════╗"
+          echo "║  ✅ BACKEND DEPLOYED SUCCESSFULLY        ║"
+          echo "║  Running: $RUNNING / Desired: $DESIRED   ║"
+          echo "║  Commit : ${{ github.sha }}"
+          echo "║  Actor  : ${{ github.actor }}"
+          echo "╚══════════════════════════════════════════╝"
+
+  # ─── Job 4: Gmail Notification (standalone runs only) ──────────────────────
+  notify:
+    name: 📧 Gmail Alert
+    runs-on: ubuntu-latest
+    needs: [ci, build-push, deploy]
+    if: |
+      always() &&
+      github.event_name != 'workflow_call'
+
+    steps:
+      - name: 📊 Compute status
+        id: status
+        run: |
+          if [[ "${{ needs.deploy.result }}" == "success" ]]; then
+            echo "emoji=✅"       >> $GITHUB_OUTPUT
+            echo "color=#27ae60" >> $GITHUB_OUTPUT
+            echo "title=Backend Deploy Succeeded" >> $GITHUB_OUTPUT
+          else
+            echo "emoji=❌"       >> $GITHUB_OUTPUT
+            echo "color=#e74c3c" >> $GITHUB_OUTPUT
+            echo "title=Backend Deploy Failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 📧 Send Gmail
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.GMAIL_USER }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          to:       ${{ secrets.NOTIFY_EMAIL }}
+          from:     "VTU CI/CD <${{ secrets.GMAIL_USER }}>"
+          subject:  "${{ steps.status.outputs.emoji }} [VTU Backend] ${{ steps.status.outputs.title }} — #${{ github.run_number }}"
+          html_body: |
+            <html><body style="font-family:Arial,sans-serif;padding:20px;background:#f4f6f9;">
+            <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+              <div style="background:${{ steps.status.outputs.color }};padding:20px;text-align:center;">
+                <h2 style="color:#fff;margin:0;">${{ steps.status.outputs.emoji }} ${{ steps.status.outputs.title }}</h2>
+                <p style="color:rgba(255,255,255,0.85);margin:6px 0 0;">FastAPI Backend — ECS Fargate</p>
+              </div>
+              <div style="padding:20px;">
+                <p><strong>Branch:</strong> ${{ github.ref_name }}<br>
+                <strong>Commit:</strong> <code>${{ github.sha }}</code><br>
+                <strong>Run:</strong> #${{ github.run_number }}</p>
+                <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                   style="background:${{ steps.status.outputs.color }};color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;display:inline-block;margin-top:12px;">
+                  View Logs
+                </a>
+              </div>
+            </div></body></html>

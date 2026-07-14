@@ -1,0 +1,180 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CD Pipeline — Staging Deploy
+# Triggers on every push to main branch
+# Builds Docker image → pushes to ECR → deploys to EKS staging namespace
+#
+# Required Secrets (GitHub → Settings → Secrets):
+#   AWS_ACCESS_KEY_ID       — IAM user with ECR push + EKS deploy permissions
+#   AWS_SECRET_ACCESS_KEY   — IAM user secret
+#   AWS_ACCOUNT_ID          — Your AWS account ID (12 digits)
+#   KUBECONFIG_STAGING      — base64-encoded kubeconfig for staging cluster
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: 🚀 CD — Staging Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'infrastructure/terraform/**'  # Infra changes handled by infra.yml
+      - '.github/workflows/vtu-checker.yml'
+
+concurrency:
+  group: cd-staging
+  cancel-in-progress: false   # Never cancel a running deploy
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-south-1.amazonaws.com
+  ECR_REPOSITORY: vtu-results
+  K8S_NAMESPACE: staging
+  IMAGE_TAG: staging-${{ github.sha }}
+
+jobs:
+
+  # ─── Job 1: Build + Push Docker Image ─────────────────────────────────────
+  build-push:
+    name: 🐳 Build & Push to ECR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:staging-latest
+          build-args: |
+            NEXT_PUBLIC_APP_ENV=staging
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Run Trivy on built image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}'
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL'
+
+  # ─── Job 2: Deploy to Staging ──────────────────────────────────────────────
+  deploy-staging:
+    name: ⚡ Deploy to Staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build-push
+    environment:
+      name: staging
+      url: https://staging.vtu-results.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_STAGING }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Verify cluster connection
+        run: kubectl cluster-info
+
+      - name: Update image in deployment
+        run: |
+          kubectl set image deployment/vtu-results \
+            vtu-results=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
+            -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Annotate deployment with commit info
+        run: |
+          kubectl annotate deployment/vtu-results \
+            kubernetes.io/change-cause="Deploy ${{ env.IMAGE_TAG }} by ${{ github.actor }} — ${{ github.event.head_commit.message }}" \
+            --overwrite \
+            -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Wait for rollout to complete
+        run: |
+          kubectl rollout status deployment/vtu-results \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --timeout=300s
+
+  # ─── Job 3: Smoke Tests ────────────────────────────────────────────────────
+  smoke-test:
+    name: 💨 Smoke Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: deploy-staging
+
+    steps:
+      - name: Wait for app to stabilize
+        run: sleep 15
+
+      - name: Health check
+        run: |
+          STAGING_URL="https://staging.vtu-results.example.com"
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "${STAGING_URL}/api/health")
+          if [ "$RESPONSE" != "200" ]; then
+            echo "❌ Health check failed: HTTP $RESPONSE"
+            exit 1
+          fi
+          echo "✅ Health check passed: HTTP $RESPONSE"
+
+      - name: Metrics endpoint check
+        run: |
+          STAGING_URL="https://staging.vtu-results.example.com"
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "${STAGING_URL}/api/metrics")
+          if [ "$RESPONSE" != "200" ]; then
+            echo "❌ Metrics endpoint failed: HTTP $RESPONSE"
+            exit 1
+          fi
+          echo "✅ Metrics endpoint healthy"
+
+      - name: Homepage check
+        run: |
+          STAGING_URL="https://staging.vtu-results.example.com"
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "$STAGING_URL")
+          if [ "$RESPONSE" != "200" ]; then
+            echo "❌ Homepage failed: HTTP $RESPONSE"
+            exit 1
+          fi
+          echo "✅ Homepage healthy"
+
+      - name: Rollback on smoke test failure
+        if: failure()
+        run: |
+          echo "⚠️ Smoke tests failed — initiating rollback"
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_STAGING }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl rollout undo deployment/vtu-results -n ${{ env.K8S_NAMESPACE }}
+          echo "✅ Rollback complete"

@@ -1,0 +1,45 @@
+name: VTU Results Auto-Updater
+
+on:
+  schedule:
+    - cron: '0 * * * *' # Run every hour
+  workflow_dispatch: # Allow manual triggers
+
+permissions:
+  contents: write
+
+jobs:
+  update-results:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run update scripts
+        run: |
+          node scripts/update-results.js
+          node scripts/update-jobs.js
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git status
+          if [ -n "$(git status --porcelain lib/vtu-data.ts lib/jobs-data.ts)" ]; then
+            echo "Changes detected in data files. Committing..."
+            git add lib/vtu-data.ts lib/jobs-data.ts
+            git commit -m "auto(data): update results and jobs postings [skip ci]"
+            git push
+          else
+            echo "No changes detected in data files."
+          fi

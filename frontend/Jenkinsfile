@@ -1,0 +1,314 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Jenkinsfile — FRONTEND (Next.js → ECS Fargate)
+//
+// Triggered by: root Jenkinsfile (monorepo orchestrator) OR directly.
+// When called from root orchestrator, BACKEND_API_URL is passed as parameter.
+//
+// Required Jenkins Credentials (Manage Jenkins → Credentials → Global):
+//   aws-access-key-id         → Secret Text
+//   aws-secret-access-key     → Secret Text
+//   aws-account-id            → Secret Text
+//   backend-api-url           → Secret Text  (fallback if param not passed)
+//   gmail-app-password        → Username+Password (Gmail + App Password)
+//
+// Gmail SMTP one-time setup (Manage Jenkins → System → Extended E-mail):
+//   SMTP: smtp.gmail.com | Port: 465 | SSL: yes
+// ─────────────────────────────────────────────────────────────────────────────
+pipeline {
+    agent any
+
+    // ── Accepts BACKEND_API_URL from root orchestrator ────────────────────────
+    parameters {
+        string(
+            name:         'BACKEND_API_URL',
+            defaultValue: '',
+            description:  'Backend API base URL — baked into Next.js build. Passed from root orchestrator or set manually.'
+        )
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    environment {
+        AWS_REGION         = 'ap-south-1'
+        ECR_REPOSITORY     = 'vtu-results'
+        ECS_CLUSTER        = 'vtu-results-cluster'
+        ECS_SERVICE        = 'vtu-results-service'
+        CONTAINER_NAME     = 'vtu-results'
+        IMAGE_TAG          = "${env.GIT_COMMIT?.take(8) ?: 'latest'}"
+        NODE_VERSION       = '20'
+        NOTIFY_TO          = 'your-email@gmail.com'  // ← change to your email
+    }
+
+    stages {
+
+        // ─── Stage 1: Source ─────────────────────────────────────────────────
+        stage('📥 Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+                    env.IMAGE_TAG = env.GIT_SHORT
+                    echo "🔖 Commit: ${env.GIT_SHORT} | Branch: ${env.GIT_BRANCH}"
+                }
+            }
+        }
+
+        // ─── Stage 2: Install + Lint ──────────────────────────────────────────
+        stage('🧹 Lint & Type Check') {
+            tools { nodejs "${NODE_VERSION}" }
+            steps {
+                sh '''
+                    echo "📦 Installing dependencies..."
+                    npm ci
+
+                    echo "🔍 Running ESLint..."
+                    npm run lint
+
+                    echo "✅ Running TypeScript type check..."
+                    npm run type-check
+                '''
+            }
+        }
+
+        // ─── Stage 3: Build ───────────────────────────────────────────────────
+        stage('🏗️ Build') {
+            tools { nodejs "${NODE_VERSION}" }
+            environment {
+                NEXT_TELEMETRY_DISABLED = '1'
+                NEXT_PUBLIC_APP_ENV     = 'production'
+            }
+            steps {
+                // Resolve BACKEND_API_URL: prefer pipeline parameter, fall back to credential
+                withCredentials([
+                    string(credentialsId: 'backend-api-url', variable: 'FALLBACK_API_URL')
+                ]) {
+                    script {
+                        def apiUrl = params.BACKEND_API_URL?.trim() ?: env.FALLBACK_API_URL
+                        echo "🔗 Backend API URL: ${apiUrl}"
+                        env.RESOLVED_BACKEND_URL = apiUrl
+                    }
+                    sh '''
+                        echo "🏗️ Building Next.js production bundle..."
+                        echo "   NEXT_PUBLIC_BACKEND_URL=${RESOLVED_BACKEND_URL}"
+                        NEXT_PUBLIC_BACKEND_URL="${RESOLVED_BACKEND_URL}" npm run build
+                        echo "✅ Build complete"
+                    '''
+                }
+            }
+        }
+
+        // ─── Stage 4: Docker Build + Push to ECR ────────────────────────────
+        stage('🐳 Docker → ECR') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'aws-access-key-id',     variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY'),
+                    string(credentialsId: 'aws-account-id',        variable: 'AWS_ACCOUNT_ID'),
+                    string(credentialsId: 'backend-api-url',       variable: 'FALLBACK_API_URL')
+                ]) {
+                    sh '''
+                        export AWS_DEFAULT_REGION=${AWS_REGION}
+                        ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+                        IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+                        IMAGE_LATEST="${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+
+                        # Resolve API URL: parameter takes priority over credential
+                        BACKEND_URL="${RESOLVED_BACKEND_URL:-${FALLBACK_API_URL}}"
+                        echo "🔗 Baking NEXT_PUBLIC_BACKEND_URL=${BACKEND_URL} into image"
+
+                        echo "🔐 Logging in to Amazon ECR..."
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                            docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+                        echo "🐳 Building Docker image: ${IMAGE_URI}"
+                        docker build \
+                            --build-arg NEXT_PUBLIC_BACKEND_URL="${BACKEND_URL}" \
+                            --build-arg NEXT_PUBLIC_APP_ENV=production \
+                            --build-arg BUILD_SHA=${IMAGE_TAG} \
+                            --tag ${IMAGE_URI} \
+                            --tag ${IMAGE_LATEST} \
+                            --file Dockerfile \
+                            .
+
+                        echo "📤 Pushing to ECR..."
+                        docker push ${IMAGE_URI}
+                        docker push ${IMAGE_LATEST}
+
+                        echo "✅ Image pushed: ${IMAGE_URI}"
+                        echo "${IMAGE_URI}" > /tmp/image_uri.txt
+                    '''
+                }
+            }
+        }
+
+        // ─── Stage 5: Deploy to ECS Fargate ─────────────────────────────────
+        stage('🚀 Deploy to ECS') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'aws-access-key-id',     variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY'),
+                    string(credentialsId: 'aws-account-id',        variable: 'AWS_ACCOUNT_ID')
+                ]) {
+                    sh '''
+                        export AWS_DEFAULT_REGION=${AWS_REGION}
+                        ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+                        IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+                        echo "📋 Fetching current ECS task definition..."
+                        TASK_DEF=$(aws ecs describe-task-definition \
+                            --task-definition ${ECS_SERVICE} \
+                            --region ${AWS_REGION} \
+                            --query taskDefinition)
+
+                        echo "📝 Updating task definition with new image..."
+                        NEW_TASK_DEF=$(echo ${TASK_DEF} | python3 -c "
+import json, sys
+td = json.load(sys.stdin)
+for c in td['containerDefinitions']:
+    if c['name'] == '${CONTAINER_NAME}':
+        c['image'] = '${IMAGE_URI}'
+        break
+# Remove fields not accepted by register-task-definition
+for key in ['taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy']:
+    td.pop(key, None)
+print(json.dumps(td))
+")
+
+                        echo "📋 Registering new task definition revision..."
+                        NEW_REVISION=$(aws ecs register-task-definition \
+                            --cli-input-json "${NEW_TASK_DEF}" \
+                            --region ${AWS_REGION} \
+                            --query 'taskDefinition.taskDefinitionArn' \
+                            --output text)
+                        echo "📌 New revision: ${NEW_REVISION}"
+
+                        echo "🚀 Updating ECS service with rolling deploy..."
+                        aws ecs update-service \
+                            --cluster ${ECS_CLUSTER} \
+                            --service ${ECS_SERVICE} \
+                            --task-definition ${NEW_REVISION} \
+                            --region ${AWS_REGION} \
+                            --force-new-deployment
+
+                        echo "⏳ Waiting for service to stabilise..."
+                        aws ecs wait services-stable \
+                            --cluster ${ECS_CLUSTER} \
+                            --services ${ECS_SERVICE} \
+                            --region ${AWS_REGION}
+
+                        echo "✅ ECS service updated successfully"
+                    '''
+                }
+            }
+        }
+
+        // ─── Stage 6: Health Check ───────────────────────────────────────────
+        stage('❤️ Health Check') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'aws-access-key-id',     variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY'),
+                    string(credentialsId: 'aws-account-id',        variable: 'AWS_ACCOUNT_ID')
+                ]) {
+                    sh '''
+                        export AWS_DEFAULT_REGION=${AWS_REGION}
+                        echo "🔍 Fetching ECS service public endpoint..."
+                        # Get the public IP from the running task
+                        TASK_ARN=$(aws ecs list-tasks \
+                            --cluster ${ECS_CLUSTER} \
+                            --service-name ${ECS_SERVICE} \
+                            --region ${AWS_REGION} \
+                            --query "taskArns[0]" \
+                            --output text)
+
+                        echo "✅ Running task: ${TASK_ARN}"
+                        echo "🌐 Health check via ECS service load balancer endpoint."
+                        echo "📋 Deploy complete — check the ECS Console for the public URL."
+                    '''
+                }
+            }
+        }
+
+    }
+
+    post {
+        success {
+            emailext(
+                to:       "${NOTIFY_TO}",
+                subject:  "✅ [VTU Frontend] Pipeline SUCCEEDED — ${env.GIT_BRANCH} #${env.BUILD_NUMBER}",
+                mimeType: 'text/html',
+                body:     """
+<html><body style="font-family:Arial,sans-serif;background:#f4f6f9;padding:20px;">
+<div style="max-width:600px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+  <div style="background:#27ae60;padding:20px;text-align:center;">
+    <h1 style="color:#fff;margin:0;">✅ Frontend Deploy Succeeded</h1>
+    <p style="color:rgba(255,255,255,0.85);margin:6px 0 0;">Next.js — ECS Fargate</p>
+  </div>
+  <div style="padding:24px;">
+    <table style="width:100%;border-collapse:collapse;">
+      <tr><td style="padding:8px;color:#666;width:160px;"><b>Branch</b></td><td style="padding:8px;">${env.GIT_BRANCH}</td></tr>
+      <tr style="background:#f9f9f9;"><td style="padding:8px;color:#666;"><b>Commit</b></td><td style="padding:8px;font-family:monospace;">${env.GIT_SHORT}</td></tr>
+      <tr><td style="padding:8px;color:#666;"><b>Build #</b></td><td style="padding:8px;">${env.BUILD_NUMBER}</td></tr>
+      <tr style="background:#f9f9f9;"><td style="padding:8px;color:#666;"><b>Backend URL</b></td><td style="padding:8px;font-family:monospace;">${env.RESOLVED_BACKEND_URL}</td></tr>
+      <tr><td style="padding:8px;color:#666;"><b>Service</b></td><td style="padding:8px;">${ECS_SERVICE}</td></tr>
+      <tr style="background:#f9f9f9;"><td style="padding:8px;color:#666;"><b>Duration</b></td><td style="padding:8px;">${currentBuild.durationString}</td></tr>
+    </table>
+    <div style="text-align:center;margin-top:20px;">
+      <a href="${env.BUILD_URL}" style="background:#27ae60;color:#fff;padding:10px 24px;border-radius:4px;text-decoration:none;font-weight:bold;">View Build Logs</a>
+    </div>
+  </div>
+</div>
+</body></html>
+                """
+            )
+        }
+
+        failure {
+            emailext(
+                to:       "${NOTIFY_TO}",
+                subject:  "❌ [VTU Frontend] Pipeline FAILED — ${env.GIT_BRANCH} #${env.BUILD_NUMBER}",
+                mimeType: 'text/html',
+                body:     """
+<html><body style="font-family:Arial,sans-serif;background:#f4f6f9;padding:20px;">
+<div style="max-width:600px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+  <div style="background:#e74c3c;padding:20px;text-align:center;">
+    <h1 style="color:#fff;margin:0;">❌ Frontend Deploy Failed</h1>
+  </div>
+  <div style="padding:24px;">
+    <p style="color:#c0392b;font-weight:bold;">⚠️ Action Required: Frontend pipeline failed. Please review immediately.</p>
+    <table style="width:100%;border-collapse:collapse;">
+      <tr><td style="padding:8px;color:#666;width:160px;"><b>Branch</b></td><td style="padding:8px;">${env.GIT_BRANCH}</td></tr>
+      <tr style="background:#f9f9f9;"><td style="padding:8px;color:#666;"><b>Commit</b></td><td style="padding:8px;font-family:monospace;">${env.GIT_SHORT}</td></tr>
+      <tr><td style="padding:8px;color:#666;"><b>Build #</b></td><td style="padding:8px;">${env.BUILD_NUMBER}</td></tr>
+      <tr style="background:#f9f9f9;"><td style="padding:8px;color:#666;"><b>Backend URL</b></td><td style="padding:8px;font-family:monospace;">${env.RESOLVED_BACKEND_URL ?: 'N/A'}</td></tr>
+    </table>
+    <div style="text-align:center;margin-top:20px;">
+      <a href="${env.BUILD_URL}console" style="background:#e74c3c;color:#fff;padding:10px 24px;border-radius:4px;text-decoration:none;font-weight:bold;">🔍 View Console</a>
+    </div>
+  </div>
+</div>
+</body></html>
+                """
+            )
+        }
+
+        fixed {
+            emailext(
+                to:       "${NOTIFY_TO}",
+                subject:  "💚 [VTU Frontend] Pipeline FIXED — ${env.GIT_BRANCH} #${env.BUILD_NUMBER}",
+                mimeType: 'text/html',
+                body:     "<p>Frontend pipeline is back to <strong>green</strong> ✅<br>Build: <a href='${env.BUILD_URL}'>${env.BUILD_URL}</a></p>"
+            )
+        }
+
+        always {
+            sh 'docker image prune -f --filter "until=24h" || true'
+            cleanWs()
+        }
+    }
+}

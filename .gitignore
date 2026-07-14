@@ -1,0 +1,51 @@
+# ─── Dependencies ────────────────────────────────────────────────────────────
+node_modules/
+.next/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env/
+
+# ─── Environment files ────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ─── Build outputs ────────────────────────────────────────────────────────────
+dist/
+build/
+out/
+.next/
+*.tsbuildinfo
+
+# ─── IDE / OS files ──────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ─── Logs ────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.python-version
+
+# ─── Terraform state (never commit real state) ───────────────────────────────
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# ─── Docker ──────────────────────────────────────────────────────────────────
+# Keep Dockerfile and .dockerignore — exclude build artifacts
+vtu_results.html

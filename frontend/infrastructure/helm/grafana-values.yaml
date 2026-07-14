@@ -1,0 +1,120 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Helm Values: Grafana (within kube-prometheus-stack)
+# Pre-configured with Prometheus datasource and dashboard provisioning
+# ─────────────────────────────────────────────────────────────────────────────
+
+grafana:
+  enabled: true
+
+  # ─── Admin Credentials ──────────────────────────────────────────────────────
+  # NEVER hardcode in production — use a K8s secret:
+  #   kubectl create secret generic grafana-admin-secret \
+  #     --from-literal=admin-user=admin \
+  #     --from-literal=admin-password=<STRONG_PASSWORD> \
+  #     -n monitoring
+  adminUser: admin
+  adminPassword: "changeme-use-k8s-secret-in-production"
+
+  # ─── Persistence ────────────────────────────────────────────────────────────
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    size: 5Gi
+
+  # ─── Resources ──────────────────────────────────────────────────────────────
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # ─── Tolerations (run on monitoring node) ───────────────────────────────────
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: monitoring
+      effect: NoSchedule
+  nodeSelector:
+    role: monitoring
+
+  # ─── Datasources ────────────────────────────────────────────────────────────
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          type: prometheus
+          url: http://kube-prometheus-stack-prometheus:9090
+          access: proxy
+          isDefault: true
+          editable: false
+          jsonData:
+            timeInterval: "15s"
+            httpMethod: POST
+
+  # ─── Dashboard Providers ─────────────────────────────────────────────────────
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: 'default'
+          orgId: 1
+          folder: ''
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/default
+
+        - name: 'vtu-results'
+          orgId: 1
+          folder: 'VTU Results App'
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/vtu-results
+
+  # ─── Dashboard ConfigMaps ────────────────────────────────────────────────────
+  # Grafana loads dashboards from ConfigMaps with label grafana_dashboard=1
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+
+  # ─── Grafana INI Configuration ───────────────────────────────────────────────
+  grafana.ini:
+    server:
+      root_url: "%(protocol)s://%(domain)s/grafana"
+      serve_from_sub_path: true
+
+    analytics:
+      check_for_updates: false
+      reporting_enabled: false
+
+    security:
+      allow_embedding: false
+      cookie_secure: true
+      cookie_samesite: strict
+
+    auth.anonymous:
+      enabled: false
+
+    log:
+      mode: console
+      level: warn
+
+  # ─── Ingress ─────────────────────────────────────────────────────────────────
+  ingress:
+    enabled: true
+    annotations:
+      kubernetes.io/ingress.class: alb
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+    hosts:
+      - "grafana.vtu-results.example.com"   # Replace with your domain
+    path: /

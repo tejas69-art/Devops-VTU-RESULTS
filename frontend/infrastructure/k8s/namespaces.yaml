@@ -1,0 +1,29 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Kubernetes Namespaces
+# Three namespaces: staging, production, monitoring
+# Applied via: kubectl apply -f infrastructure/k8s/namespaces.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  labels:
+    environment: staging
+    app.kubernetes.io/managed-by: kubectl
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    environment: production
+    app.kubernetes.io/managed-by: kubectl
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    environment: monitoring
+    app.kubernetes.io/managed-by: kubectl

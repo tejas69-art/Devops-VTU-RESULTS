@@ -1,0 +1,201 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Infrastructure Pipeline — Terraform Plan & Apply
+# Triggers on changes to infrastructure/terraform/** files
+#
+# Required Secrets:
+#   AWS_ACCESS_KEY_ID          — IAM user with Terraform permissions
+#   AWS_SECRET_ACCESS_KEY      — IAM secret
+#   TF_VAR_grafana_admin_password — Grafana admin password
+#
+# Required Permissions for IAM user:
+#   AmazonVPCFullAccess, AmazonEKSFullAccess, AmazonEC2ContainerRegistryFullAccess,
+#   IAMFullAccess, AmazonS3FullAccess, AmazonDynamoDBFullAccess
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: 🏗️ Infrastructure — Terraform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infrastructure/terraform/**'
+      - '.github/workflows/infra.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infrastructure/terraform/**'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Terraform action to perform'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+env:
+  AWS_REGION: ap-south-1
+  TF_WORKING_DIR: infrastructure/terraform
+  TF_VERSION: 1.8.5
+
+permissions:
+  contents: read
+  pull-requests: write   # For posting plan output as PR comment
+
+jobs:
+
+  # ─── Job 1: Terraform Validate ────────────────────────────────────────────
+  terraform-validate:
+    name: 🔍 Terraform Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check -recursive
+        continue-on-error: false
+
+      - name: Terraform Init (local validation)
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate
+
+  # ─── Job 2: Terraform Plan ────────────────────────────────────────────────
+  terraform-plan:
+    name: 📋 Terraform Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: terraform-validate
+
+    outputs:
+      plan-exit-code: ${{ steps.plan.outputs.exit-code }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform plan \
+            -var="grafana_admin_password=${{ secrets.TF_VAR_GRAFANA_ADMIN_PASSWORD }}" \
+            -out=tfplan \
+            -detailed-exitcode \
+            -no-color 2>&1 | tee plan-output.txt
+          echo "exit-code=$?" >> $GITHUB_OUTPUT
+        continue-on-error: true
+        env:
+          TF_VAR_grafana_admin_password: ${{ secrets.TF_VAR_GRAFANA_ADMIN_PASSWORD }}
+
+      - name: Save plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ github.sha }}
+          path: |
+            ${{ env.TF_WORKING_DIR }}/tfplan
+            ${{ env.TF_WORKING_DIR }}/plan-output.txt
+          retention-days: 5
+
+      - name: Post Terraform plan to PR
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync('${{ env.TF_WORKING_DIR }}/plan-output.txt', 'utf8');
+            const maxLen = 60000;
+            const truncated = planOutput.length > maxLen
+              ? planOutput.substring(0, maxLen) + '\n...(truncated)'
+              : planOutput;
+            const exitCode = '${{ steps.plan.outputs.exit-code }}';
+            const status = exitCode === '0' ? '✅ No changes' : exitCode === '2' ? '⚠️ Changes detected' : '❌ Error';
+            const body = `## 🏗️ Terraform Plan\n\n**Status**: ${status}\n\n<details>\n<summary>Plan Output</summary>\n\n\`\`\`hcl\n${truncated}\n\`\`\`\n</details>\n\n*Triggered by: ${{ github.actor }}*`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+  # ─── Job 3: Terraform Apply (main branch + manual trigger only) ───────────
+  terraform-apply:
+    name: 🚀 Terraform Apply
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: terraform-plan
+
+    # Only apply on main branch push or manual trigger with action=apply
+    if: |
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+
+    environment:
+      name: infrastructure    # Requires manual approval in GitHub Environments
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-${{ github.sha }}
+          path: ${{ env.TF_WORKING_DIR }}/
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform apply -auto-approve tfplan
+        env:
+          TF_VAR_grafana_admin_password: ${{ secrets.TF_VAR_GRAFANA_ADMIN_PASSWORD }}
+
+      - name: Terraform Output
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform output
