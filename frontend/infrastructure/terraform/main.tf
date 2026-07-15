@@ -175,7 +175,10 @@ resource "helm_release" "kube_prometheus_stack" {
     file("${path.module}/../helm/grafana-values.yaml"),
   ]
 
-  depends_on = [kubernetes_namespace.monitoring]
+  depends_on = [
+    kubernetes_namespace.monitoring,
+    kubernetes_storage_class.gp3
+  ]
 }
 
 # ─── AWS Load Balancer Controller (via Helm) ──────────────────────────────────
@@ -184,7 +187,7 @@ resource "helm_release" "aws_lbc" {
   name             = "aws-load-balancer-controller"
   repository       = "https://aws.github.io/eks-charts"
   chart            = "aws-load-balancer-controller"
-  version          = "1.7.4"
+  version          = "1.7.2"
   namespace        = "kube-system"
 
   set {
@@ -195,6 +198,23 @@ resource "helm_release" "aws_lbc" {
   set {
     name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
     value = module.eks.load_balancer_controller_role_arn
+  }
+
+  depends_on = [module.eks]
+}
+
+# ─── Kubernetes Storage Class (gp3) ───────────────────────────────────────────
+
+resource "kubernetes_storage_class" "gp3" {
+  metadata {
+    name = "gp3"
+  }
+
+  storage_provisioner = "ebs.csi.aws.com"
+  volume_binding_mode = "WaitForFirstConsumer"
+
+  parameters = {
+    type = "gp3"
   }
 
   depends_on = [module.eks]

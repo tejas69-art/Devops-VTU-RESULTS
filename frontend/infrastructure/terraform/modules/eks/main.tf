@@ -98,6 +98,7 @@ resource "aws_iam_role_policy_attachment" "eks_node_policies" {
     "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
     "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
     "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy",
+    "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy",
   ])
 
   role       = aws_iam_role.eks_node.name
@@ -200,4 +201,15 @@ resource "aws_iam_policy" "load_balancer_controller" {
 resource "aws_iam_role_policy_attachment" "load_balancer_controller" {
   role       = aws_iam_role.load_balancer_controller.name
   policy_arn = aws_iam_policy.load_balancer_controller.arn
+}
+
+# ─── EKS Addons ───────────────────────────────────────────────────────────────
+
+resource "aws_eks_addon" "ebs_csi" {
+  cluster_name = aws_eks_cluster.main.name
+  addon_name   = "aws-ebs-csi-driver"
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_node_policies
+  ]
 }
