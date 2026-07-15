@@ -24,6 +24,11 @@ permissions:
   security-events: write     # For SARIF upload to GitHub Security tab
   pull-requests: write       # For posting PR comments
 
+# ── All `run` steps default to frontend/ subdirectory ──────────────────────
+defaults:
+  run:
+    working-directory: frontend
+
 jobs:
 
   # ─── Job 1: Lint + Type Check ──────────────────────────────────────────────
@@ -41,6 +46,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -68,6 +74,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -76,14 +83,13 @@ jobs:
         run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: 1
-          # Use example env for CI build
           NEXT_PUBLIC_APP_ENV: ci
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: nextjs-build-${{ github.sha }}
-          path: .next/
+          path: frontend/.next/
           retention-days: 1
 
   # ─── Job 3: Security — npm audit ──────────────────────────────────────────
@@ -101,6 +107,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -138,7 +145,7 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
-          scan-ref: '.'
+          scan-ref: 'frontend'
           format: 'sarif'
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
@@ -167,6 +174,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
         run: npm ci
