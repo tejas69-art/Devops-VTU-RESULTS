@@ -322,10 +322,10 @@ jobs:
           else
             git commit -m "ci(gitops): update frontend image to ${{ github.sha }}
 
-- Staging:    auto-sync via ArgoCD ✅
-- Production: awaiting manual sync (argocd app sync vtu-frontend-production)
-- Commit: ${{ github.sha }}
-- Actor:  ${{ github.actor }}"
+            - Staging:    auto-sync via ArgoCD ✅
+            - Production: awaiting manual sync (argocd app sync vtu-frontend-production)
+            - Commit: ${{ github.sha }}
+            - Actor:  ${{ github.actor }}"
             git push origin main
             echo "✅ GitOps commit pushed"
           fi
