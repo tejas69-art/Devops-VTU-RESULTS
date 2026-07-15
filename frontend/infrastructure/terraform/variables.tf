@@ -38,7 +38,7 @@ variable "cluster_version" {
 variable "node_instance_types" {
   description = "EC2 instance types for EKS worker nodes"
   type        = list(string)
-  default     = ["t3.medium"] # 2 vCPU, 4GB RAM — suitable for Next.js + monitoring
+  default     = ["c7i-flex.large"] # Free tier eligible in this account
 }
 
 variable "node_desired_size" {

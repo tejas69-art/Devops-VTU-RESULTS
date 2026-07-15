@@ -143,7 +143,7 @@ resource "aws_eks_node_group" "monitoring" {
   node_group_name = "${var.project_name}-monitoring-nodes"
   node_role_arn   = aws_iam_role.eks_node.arn
   subnet_ids      = var.private_subnet_ids
-  instance_types  = ["t3.large"] # More memory for Prometheus TSDB
+  instance_types  = ["c7i-flex.large"] # Free tier eligible in this account
 
   scaling_config {
     desired_size = 1
