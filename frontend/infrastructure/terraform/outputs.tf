@@ -21,6 +21,11 @@ output "ecr_repository_url" {
   value       = module.ecr.repository_url
 }
 
+output "backend_ecr_repository_url" {
+  description = "Backend ECR repository URL for Docker image pushes"
+  value       = module.ecr.backend_repository_url
+}
+
 output "configure_kubectl" {
   description = "Command to configure kubectl to talk to this cluster"
   value       = "aws eks update-kubeconfig --region ${var.aws_region} --name ${module.eks.cluster_name}"

@@ -68,3 +68,29 @@ resource "aws_ecr_lifecycle_policy" "app" {
     ]
   })
 }
+
+# ─── Backend ECR Repository ───────────────────────────────────────────────────
+# Creates a separate ECR repository for the Backend Docker image.
+
+resource "aws_ecr_repository" "backend" {
+  name                 = "vtu-backend"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+
+  tags = {
+    Name        = "vtu-backend-ecr"
+    Environment = var.environment
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "backend" {
+  repository = aws_ecr_repository.backend.name
+  policy     = aws_ecr_lifecycle_policy.app.policy
+}
