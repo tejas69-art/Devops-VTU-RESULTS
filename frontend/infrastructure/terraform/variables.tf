@@ -44,7 +44,7 @@ variable "node_instance_types" {
 variable "node_desired_size" {
   description = "Desired number of EKS worker nodes"
   type        = number
-  default     = 2
+  default     = 1
 }
 
 variable "node_min_size" {
@@ -56,7 +56,7 @@ variable "node_min_size" {
 variable "node_max_size" {
   description = "Maximum number of EKS worker nodes (for cluster autoscaler)"
   type        = number
-  default     = 5
+  default     = 2
 }
 
 variable "grafana_admin_password" {

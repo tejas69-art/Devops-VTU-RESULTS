@@ -49,7 +49,7 @@ provider "aws" {
     tags = {
       Project     = "vtu-results"
       ManagedBy   = "Terraform"
-      Repository  = "github.com/tejas69-art/results-scrapper"
+      Repository  = "github.com/tejas69-art/Devops-VTU-RESULTS"
     }
   }
 }
@@ -99,25 +99,27 @@ module "eks" {
 
 # ─── Kubernetes + Helm Providers (configured after EKS is ready) ──────────────
 
-data "aws_eks_cluster" "cluster" {
-  name = module.eks.cluster_name
-}
-
-data "aws_eks_cluster_auth" "cluster" {
-  name = module.eks.cluster_name
-}
-
 provider "kubernetes" {
-  host                   = data.aws_eks_cluster.cluster.endpoint
-  cluster_ca_certificate = base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data)
-  token                  = data.aws_eks_cluster_auth.cluster.token
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority)
+  
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.aws_region]
+  }
 }
 
 provider "helm" {
   kubernetes {
-    host                   = data.aws_eks_cluster.cluster.endpoint
-    cluster_ca_certificate = base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data)
-    token                  = data.aws_eks_cluster_auth.cluster.token
+    host                   = module.eks.cluster_endpoint
+    cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority)
+    
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.aws_region]
+    }
   }
 }
 
@@ -158,26 +160,26 @@ resource "kubernetes_namespace" "monitoring" {
 
 # ─── Helm: kube-prometheus-stack ─────────────────────────────────────────────
 
-resource "helm_release" "kube_prometheus_stack" {
-  name             = "kube-prometheus-stack"
-  repository       = "https://prometheus-community.github.io/helm-charts"
-  chart            = "kube-prometheus-stack"
-  version          = "58.7.2"
-  namespace        = kubernetes_namespace.monitoring.metadata[0].name
-  create_namespace = false
-  wait             = true
-  timeout          = 600
-
-  values = [
-    file("${path.module}/../helm/prometheus-values.yaml"),
-    file("${path.module}/../helm/grafana-values.yaml"),
-  ]
-
-  depends_on = [
-    kubernetes_namespace.monitoring,
-    kubernetes_storage_class.gp3
-  ]
-}
+# resource "helm_release" "kube_prometheus_stack" {
+#   name             = "kube-prometheus-stack"
+#   repository       = "https://prometheus-community.github.io/helm-charts"
+#   chart            = "kube-prometheus-stack"
+#   version          = "58.7.2"
+#   namespace        = kubernetes_namespace.monitoring.metadata[0].name
+#   create_namespace = false
+#   wait             = true
+#   timeout          = 600
+# 
+#   values = [
+#     file("${path.module}/../helm/prometheus-values.yaml"),
+#     file("${path.module}/../helm/grafana-values.yaml"),
+#   ]
+# 
+#   depends_on = [
+#     kubernetes_namespace.monitoring,
+#     kubernetes_storage_class.gp3
+#   ]
+# }
 
 # ─── AWS Load Balancer Controller (via Helm) ──────────────────────────────────
 
@@ -196,6 +198,11 @@ resource "helm_release" "aws_lbc" {
   set {
     name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
     value = module.eks.load_balancer_controller_role_arn
+  }
+
+  set {
+    name  = "vpcId"
+    value = module.vpc.vpc_id
   }
 
   depends_on = [module.eks]

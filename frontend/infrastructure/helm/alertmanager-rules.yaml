@@ -29,7 +29,7 @@ spec:
           annotations:
             summary: "VTU Results app is DOWN"
             description: "The application has been unreachable for more than 1 minute. Check pod status: kubectl get pods -n production"
-            runbook_url: "https://github.com/tejas69-art/results-scrapper/blob/main/infrastructure/README.md#runbook"
+            runbook_url: "https://github.com/tejas69-art/Devops-VTU-RESULTS/blob/main/infrastructure/README.md#runbook"
 
         - alert: PodCrashLooping
           expr: |
