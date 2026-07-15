@@ -121,6 +121,11 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: 🔧 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        # Required: switches from the default 'docker' driver (which does NOT
+        # support type=gha cache) to 'docker-container' driver which does.
+
       - name: 🐳 Build & Push backend image
         uses: docker/build-push-action@v5
         with:
@@ -229,6 +234,10 @@ jobs:
       - name: 🔐 Login to ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 🔧 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        # Required: switches to 'docker-container' driver for type=gha cache support
 
       - name: 🐳 Build & Push frontend image
         uses: docker/build-push-action@v5
