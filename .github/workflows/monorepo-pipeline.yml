@@ -79,6 +79,8 @@ jobs:
     if: |
       needs.detect-changes.outputs.backend == 'true' ||
       inputs.force_backend == true
+    outputs:
+      backend_url: ${{ steps.get-backend-url.outputs.backend_url }}
 
     defaults:
       run:
@@ -172,6 +174,16 @@ jobs:
             exit 1
           fi
 
+      - name: 🔗 Resolve and Auto-inject Backend URL
+        id: get-backend-url
+        run: bash scripts/get-backend-url.sh
+        env:
+          ECS_CLUSTER: ${{ env.ECS_CLUSTER }}
+          ECS_SERVICE: ${{ env.ECS_SERVICE }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+          GH_TOKEN: ${{ secrets.GITOPS_TOKEN || secrets.GITHUB_TOKEN }}
+
+
   # ─── Job 3: Frontend CI/CD (runs AFTER backend) ─────────────────────────────
   frontend-deploy:
     name: ⚡ Frontend — CI/CD
@@ -189,16 +201,43 @@ jobs:
         working-directory: frontend
 
     env:
-      AWS_REGION:     ap-south-1
-      ECR_REPOSITORY: vtu-results
-      ECS_CLUSTER:    vtu-results-cluster
-      ECS_SERVICE:    vtu-results-service
-      CONTAINER_NAME: vtu-results
-      NODE_VERSION:   '20'
+      AWS_REGION:      ap-south-1
+      ECR_REPOSITORY:  vtu-results
+      NODE_VERSION:    '20'
+      GITOPS_STAGING_DIR:    frontend/gitops/overlays/staging
+      GITOPS_PRODUCTION_DIR: frontend/gitops/overlays/production
 
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITOPS_TOKEN || secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: 🔑 Configure AWS credentials
+        id: aws-creds
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ap-south-1
+
+      - name: 🔗 Resolve Backend API URL
+        id: resolve-url
+        run: |
+          RESOLVED_URL="${{ needs.backend-deploy.outputs.backend_url }}"
+          if [ -z "$RESOLVED_URL" ]; then
+            RESOLVED_URL="${{ secrets.BACKEND_API_URL }}"
+          fi
+          if [ -z "$RESOLVED_URL" ]; then
+            echo "🔍 Querying SSM Parameter Store..."
+            RESOLVED_URL=$(aws ssm get-parameter --name "/vtu/backend/api-url" --region ap-south-1 --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          fi
+          if [ -z "$RESOLVED_URL" ]; then
+            RESOLVED_URL="http://localhost:8000"
+          fi
+          echo "Resolved Backend URL: $RESOLVED_URL"
+          echo "backend_url=$RESOLVED_URL" >> $GITHUB_OUTPUT
 
       - name: ⚙️ Setup Node.js ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v4
@@ -221,15 +260,7 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: 1
           NEXT_PUBLIC_APP_ENV: production
-          # Backend API URL baked into the Next.js bundle at build time
-          NEXT_PUBLIC_BACKEND_URL: ${{ secrets.BACKEND_API_URL }}
-
-      - name: 🔑 Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ap-south-1
+          NEXT_PUBLIC_BACKEND_URL: ${{ steps.resolve-url.outputs.backend_url }}
 
       - name: 🔐 Login to ECR
         id: login-ecr
@@ -237,7 +268,6 @@ jobs:
 
       - name: 🔧 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        # Required: switches to 'docker-container' driver for type=gha cache support
 
       - name: 🐳 Build & Push frontend image
         uses: docker/build-push-action@v5
@@ -249,40 +279,56 @@ jobs:
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
           build-args: |
-            NEXT_PUBLIC_BACKEND_URL=${{ secrets.BACKEND_API_URL }}
+            NEXT_PUBLIC_BACKEND_URL=${{ steps.resolve-url.outputs.backend_url }}
             NEXT_PUBLIC_APP_ENV=production
             BUILD_SHA=${{ github.sha }}
           cache-from: type=gha,scope=frontend
           cache-to:   type=gha,scope=frontend,mode=max
           platforms:  linux/amd64
 
-      - name: 📋 Render ECS task definition
-        id: render-task
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
+      - name: 🛠️ Install Kustomize
+        uses: imranismail/setup-kustomize@v2
         with:
-          task-definition-family: ${{ env.ECS_SERVICE }}
-          container-name:         ${{ env.CONTAINER_NAME }}
-          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          kustomize-version: '5.3.0'
 
-      - name: 🚀 Deploy frontend to ECS (rolling)
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition:            ${{ steps.render-task.outputs.task-definition }}
-          service:                    ${{ env.ECS_SERVICE }}
-          cluster:                    ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-
-      - name: ❤️ Frontend health check
+      - name: 🏷️ Update STAGING overlay image tag
+        working-directory: ${{ env.GITOPS_STAGING_DIR }}
         run: |
-          RUNNING=$(aws ecs describe-services \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }} \
-            --query 'services[0].runningCount' --output text)
-          DESIRED=$(aws ecs describe-services \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }} \
-            --query 'services[0].desiredCount' --output text)
-          echo "✅ Frontend ECS: ${RUNNING}/${DESIRED} tasks running"
+          ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          echo "🔗 Setting staging image to: ${ECR_IMAGE}:${{ github.sha }}"
+          kustomize edit set image vtu-results="${ECR_IMAGE}:${{ github.sha }}"
+          cat kustomization.yaml | grep newTag
+
+      - name: 🏷️ Update PRODUCTION overlay image tag
+        working-directory: ${{ env.GITOPS_PRODUCTION_DIR }}
+        run: |
+          ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          echo "🔗 Setting production image to: ${ECR_IMAGE}:${{ github.sha }}"
+          kustomize edit set image vtu-results="${ECR_IMAGE}:${{ github.sha }}"
+          cat kustomization.yaml | grep newTag
+
+      - name: 📤 Commit & push image tag updates
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            ${{ env.GITOPS_STAGING_DIR }}/kustomization.yaml \
+            ${{ env.GITOPS_PRODUCTION_DIR }}/kustomization.yaml
+
+          # Only commit if there are actual changes
+          if git diff --staged --quiet; then
+            echo "⚠️  No image tag changes to commit"
+          else
+            git commit -m "ci(gitops): update frontend image to ${{ github.sha }}
+
+- Staging:    auto-sync via ArgoCD ✅
+- Production: awaiting manual sync (argocd app sync vtu-frontend-production)
+- Commit: ${{ github.sha }}
+- Actor:  ${{ github.actor }}"
+            git push origin main
+            echo "✅ GitOps commit pushed"
+          fi
 
   # ─── Job 4: Gmail Notification ──────────────────────────────────────────────
   notify:
