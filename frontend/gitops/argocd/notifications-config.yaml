@@ -1,0 +1,145 @@
+# =============================================================================
+# ArgoCD Notifications — Gmail SMTP Configuration
+# Apply with: kubectl apply -f notifications-config.yaml
+#
+# Requires argocd-notifications controller to be installed:
+#   kubectl apply -n argocd -f \
+#     https://raw.githubusercontent.com/argoproj-labs/argocd-notifications/stable/manifests/install.yaml
+#
+# Gmail credentials stored in argocd-notifications-secret (see Secret below).
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+  namespace: argocd
+data:
+  # ── SMTP Service Configuration ─────────────────────────────────────────────
+  service.email.gmail: |
+    host: smtp.gmail.com
+    port: 465
+    secure: true
+    username: $email-username
+    password: $email-password
+
+  # ── Email Templates ─────────────────────────────────────────────────────────
+  template.app-deployed: |
+    email:
+      subject: "✅ [ArgoCD] {{.app.metadata.name}} Deployed Successfully"
+      body: |
+        <!DOCTYPE html>
+        <html>
+        <body style="font-family:Arial,sans-serif;background:#f4f6f9;padding:20px;margin:0;">
+          <div style="max-width:580px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+            <div style="background:#27ae60;padding:20px;text-align:center;">
+              <h2 style="color:#fff;margin:0;">✅ Deployment Succeeded</h2>
+              <p style="color:rgba(255,255,255,0.85);margin:6px 0 0;">ArgoCD GitOps — VTU Results</p>
+            </div>
+            <div style="padding:24px;">
+              <table style="width:100%;border-collapse:collapse;">
+                <tr><td style="padding:8px;color:#666;width:140px;"><b>Application</b></td><td style="padding:8px;">{{.app.metadata.name}}</td></tr>
+                <tr style="background:#f9f9f9;"><td style="padding:8px;color:#666;"><b>Environment</b></td><td style="padding:8px;">{{.app.metadata.labels.environment}}</td></tr>
+                <tr><td style="padding:8px;color:#666;"><b>Revision</b></td><td style="padding:8px;font-family:monospace;">{{.app.status.sync.revision}}</td></tr>
+                <tr style="background:#f9f9f9;"><td style="padding:8px;color:#666;"><b>Sync Status</b></td><td style="padding:8px;">{{.app.status.sync.status}}</td></tr>
+                <tr><td style="padding:8px;color:#666;"><b>Health</b></td><td style="padding:8px;">{{.app.status.health.status}}</td></tr>
+              </table>
+              <div style="text-align:center;margin-top:20px;">
+                <a href="{{.context.argocdUrl}}/applications/{{.app.metadata.name}}"
+                   style="background:#27ae60;color:#fff;padding:10px 24px;border-radius:4px;text-decoration:none;font-weight:bold;">
+                  View in ArgoCD
+                </a>
+              </div>
+            </div>
+          </div>
+        </body>
+        </html>
+
+  template.app-sync-failed: |
+    email:
+      subject: "❌ [ArgoCD] {{.app.metadata.name}} Sync FAILED"
+      body: |
+        <!DOCTYPE html>
+        <html>
+        <body style="font-family:Arial,sans-serif;background:#f4f6f9;padding:20px;margin:0;">
+          <div style="max-width:580px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+            <div style="background:#e74c3c;padding:20px;text-align:center;">
+              <h2 style="color:#fff;margin:0;">❌ Sync Failed</h2>
+              <p style="color:rgba(255,255,255,0.85);margin:6px 0 0;">⚠️ Immediate action required</p>
+            </div>
+            <div style="padding:24px;">
+              <table style="width:100%;border-collapse:collapse;">
+                <tr><td style="padding:8px;color:#666;width:140px;"><b>Application</b></td><td style="padding:8px;">{{.app.metadata.name}}</td></tr>
+                <tr style="background:#f9f9f9;"><td style="padding:8px;color:#666;"><b>Environment</b></td><td style="padding:8px;">{{.app.metadata.labels.environment}}</td></tr>
+                <tr><td style="padding:8px;color:#666;"><b>Revision</b></td><td style="padding:8px;font-family:monospace;">{{.app.status.sync.revision}}</td></tr>
+                <tr style="background:#f9f9f9;"><td style="padding:8px;color:#666;"><b>Error</b></td><td style="padding:8px;color:#e74c3c;">{{.app.status.operationState.message}}</td></tr>
+              </table>
+              <div style="text-align:center;margin-top:20px;">
+                <a href="{{.context.argocdUrl}}/applications/{{.app.metadata.name}}"
+                   style="background:#e74c3c;color:#fff;padding:10px 24px;border-radius:4px;text-decoration:none;font-weight:bold;">
+                  🔍 View ArgoCD Logs
+                </a>
+              </div>
+            </div>
+          </div>
+        </body>
+        </html>
+
+  template.app-health-degraded: |
+    email:
+      subject: "⚠️ [ArgoCD] {{.app.metadata.name}} Health Degraded"
+      body: |
+        <p>Application <strong>{{.app.metadata.name}}</strong> health is <strong>{{.app.status.health.status}}</strong>.</p>
+        <p>Message: {{.app.status.health.message}}</p>
+        <p><a href="{{.context.argocdUrl}}/applications/{{.app.metadata.name}}">View in ArgoCD →</a></p>
+
+  # ── Triggers — when to send which template ────────────────────────────────
+  trigger.on-deployed: |
+    - description: Notify when app is synced and healthy
+      send:
+        - app-deployed
+      when: app.status.operationState.phase in ['Succeeded'] and app.status.health.status == 'Healthy'
+
+  trigger.on-sync-failed: |
+    - description: Notify when sync fails
+      send:
+        - app-sync-failed
+      when: app.status.operationState.phase in ['Error', 'Failed']
+
+  trigger.on-health-degraded: |
+    - description: Notify when app becomes unhealthy
+      send:
+        - app-health-degraded
+      when: app.status.health.status == 'Degraded'
+
+  # ── Default triggers applied to all apps ─────────────────────────────────
+  defaultTriggers: |
+    - on-deployed
+    - on-sync-failed
+    - on-health-degraded
+
+  # ── ArgoCD server URL (shown in notification links) ──────────────────────
+  context: |
+    argocdUrl: https://argocd.yourdomain.com   # ← update after install
+
+---
+# =============================================================================
+# ArgoCD Notifications Secret — Gmail credentials
+# Apply with: kubectl apply -f notifications-config.yaml
+# OR create manually:
+#   kubectl create secret generic argocd-notifications-secret \
+#     --from-literal=email-username=you@gmail.com \
+#     --from-literal=email-password=your-app-password \
+#     -n argocd
+# =============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argocd-notifications-secret
+  namespace: argocd
+type: Opaque
+stringData:
+  # ← Replace with your Gmail + App Password (16-char)
+  # Generate App Password at: https://myaccount.google.com/apppasswords
+  email-username: your-email@gmail.com
+  email-password: your-app-password-here

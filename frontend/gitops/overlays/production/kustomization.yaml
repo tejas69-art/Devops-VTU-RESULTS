@@ -1,0 +1,42 @@
+# =============================================================================
+# Kustomize Overlay — PRODUCTION
+# Inherits everything from base, overrides namespace + image tag.
+# CI auto-updates `newTag` on every tagged release.
+# ArgoCD Application for production uses MANUAL sync for safety.
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: production
+
+bases:
+  - ../../base
+
+# ── Image Tag (updated by CI automatically) ───────────────────────────────────
+# CI command: kustomize edit set image vtu-results=<ECR_REGISTRY>/vtu-results:<SHA>
+# This is the file ArgoCD watches — every image tag change triggers a sync prompt.
+images:
+  - name: vtu-results
+    newName: <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/vtu-results
+    newTag: latest   # ← CI replaces this with the actual git SHA
+
+# ── Production patches ────────────────────────────────────────────────────────
+patches:
+  # Production hostname
+  - patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: vtu-results.yourdomain.com
+    target:
+      kind: Ingress
+      name: vtu-results
+
+# ── Production labels ─────────────────────────────────────────────────────────
+commonLabels:
+  environment: production
+
+# ── Production ConfigMap ──────────────────────────────────────────────────────
+configMapGenerator:
+  - name: vtu-results-config
+    literals:
+      - NEXT_PUBLIC_APP_ENV=production

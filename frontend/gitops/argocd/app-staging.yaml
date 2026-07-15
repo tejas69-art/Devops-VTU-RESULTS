@@ -1,0 +1,59 @@
+# =============================================================================
+# ArgoCD Application — VTU Frontend STAGING
+# Auto-sync enabled: ArgoCD watches frontend/gitops/overlays/staging and
+# automatically applies changes when CI commits a new image tag.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: vtu-frontend-staging
+  namespace: argocd
+  labels:
+    app: vtu-results
+    environment: staging
+  annotations:
+    # Gmail notification annotation — triggers argocd-notifications
+    notifications.argoproj.io/subscribe.on-deployed.email: "your-email@gmail.com"
+    notifications.argoproj.io/subscribe.on-sync-failed.email: "your-email@gmail.com"
+    notifications.argoproj.io/subscribe.on-health-degraded.email: "your-email@gmail.com"
+  # Prevent ArgoCD from deleting this Application when you run `kubectl delete`
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/tejas69-art/Devops-VTU-RESULTS.git
+    targetRevision: main
+    path: frontend/gitops/overlays/staging
+
+  destination:
+    server: https://kubernetes.default.svc   # In-cluster
+    namespace: staging
+
+  syncPolicy:
+    # ── Auto-sync: staging gets every commit automatically ────────────────────
+    automated:
+      prune: true       # Delete K8s resources removed from Git
+      selfHeal: true    # Re-sync if someone manually edits K8s state
+
+    syncOptions:
+      - CreateNamespace=true          # Create staging namespace if missing
+      - PrunePropagationPolicy=foreground
+      - ApplyOutOfSyncOnly=true       # Only sync resources that differ
+
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # ── Health checks ArgoCD watches ──────────────────────────────────────────
+  ignoreDifferences:
+    # Ignore HPA's current replica count (ArgoCD shouldn't fight with HPA)
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+      jsonPointers:
+        - /spec/replicas

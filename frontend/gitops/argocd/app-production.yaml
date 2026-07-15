@@ -1,0 +1,56 @@
+# =============================================================================
+# ArgoCD Application — VTU Frontend PRODUCTION
+# Manual sync: CI commits the new image tag, but a human must click "Sync"
+# in the ArgoCD UI (or run: argocd app sync vtu-frontend-production).
+# This prevents accidental auto-deploys to production.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: vtu-frontend-production
+  namespace: argocd
+  labels:
+    app: vtu-results
+    environment: production
+  annotations:
+    notifications.argoproj.io/subscribe.on-deployed.email: "your-email@gmail.com"
+    notifications.argoproj.io/subscribe.on-sync-failed.email: "your-email@gmail.com"
+    notifications.argoproj.io/subscribe.on-health-degraded.email: "your-email@gmail.com"
+    notifications.argoproj.io/subscribe.on-sync-status-unknown.email: "your-email@gmail.com"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/tejas69-art/Devops-VTU-RESULTS.git
+    targetRevision: main
+    path: frontend/gitops/overlays/production
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+
+  syncPolicy:
+    # ── NO automated block = manual sync required for production ──────────────
+    # To deploy: argocd app sync vtu-frontend-production
+    # Or use the ArgoCD UI → click "Sync"
+
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - ApplyOutOfSyncOnly=true
+
+    retry:
+      limit: 2
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m
+
+  ignoreDifferences:
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+      jsonPointers:
+        - /spec/replicas

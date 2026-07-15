@@ -1,0 +1,20 @@
+# =============================================================================
+# Kustomize Base — VTU Frontend
+# All K8s resources referenced here. Overlays patch on top of this.
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - hpa.yaml
+  - pdb.yaml
+
+# Image is overridden by each overlay's kustomization.yaml
+# CI updates the tag automatically via: kustomize edit set image
+images:
+  - name: vtu-results
+    newName: <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/vtu-results
+    newTag: latest

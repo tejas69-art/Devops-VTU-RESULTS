@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vtu-results-pdb
+  labels:
+    app: vtu-results
+    app.kubernetes.io/managed-by: argocd
+spec:
+  # At least 1 pod must always be available during node drains / upgrades
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: vtu-results

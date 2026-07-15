@@ -1,17 +1,29 @@
 # =============================================================================
-# GitHub Actions — Frontend CI/CD (reusable workflow)
+# GitHub Actions — Frontend CI + GitOps Image Update
 # File: frontend/.github/workflows/frontend-ci-cd.yml
 #
-# This workflow is called BY the monorepo orchestrator.
-# It can also be triggered directly on push to main (frontend/** changed).
+# CI/CD Flow:
+#   1. Lint + type-check
+#   2. Docker build + push to ECR (NEXT_PUBLIC_BACKEND_URL baked in)
+#   3. Update image tag in frontend/gitops/overlays/staging/kustomization.yaml
+#   4. Commit + push back to main  ←  ArgoCD detects this and syncs to EKS
 #
-# Key: accepts `backend_url` as an input — baked into Next.js at build time.
+# Deploy to Production:
+#   After step 3, ArgoCD shows the app as OutOfSync.
+#   A human runs: argocd app sync vtu-frontend-production
+#   OR approves in the ArgoCD UI.
+#
+# Required Secrets:
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ACCOUNT_ID
+#   BACKEND_API_URL     — baked into Next.js at build time
+#   GITOPS_TOKEN        — GitHub PAT (repo scope) for committing image tag back
+#   GMAIL_USER, GMAIL_APP_PASSWORD, NOTIFY_EMAIL
 # =============================================================================
 
 name: ⚡ Frontend — CI/CD
 
 on:
-  # Called by monorepo orchestrator (passes backend_url)
+  # Also called via workflow_call (passes secrets through)
   workflow_call:
     inputs:
       backend_url:
@@ -19,22 +31,16 @@ on:
         type: string
         required: false
     secrets:
-      AWS_ACCESS_KEY_ID:
-        required: true
-      AWS_SECRET_ACCESS_KEY:
-        required: true
-      AWS_ACCOUNT_ID:
-        required: true
-      BACKEND_API_URL:
-        required: false    # Fallback if input not provided
-      GMAIL_USER:
-        required: false
-      GMAIL_APP_PASSWORD:
-        required: false
-      NOTIFY_EMAIL:
-        required: false
+      AWS_ACCESS_KEY_ID:     { required: true }
+      AWS_SECRET_ACCESS_KEY: { required: true }
+      AWS_ACCOUNT_ID:        { required: true }
+      BACKEND_API_URL:       { required: false }
+      GITOPS_TOKEN:          { required: false }
+      GMAIL_USER:            { required: false }
+      GMAIL_APP_PASSWORD:    { required: false }
+      NOTIFY_EMAIL:          { required: false }
 
-  # Also runs standalone on direct push (e.g. frontend-only changes)
+  # Standalone trigger on direct push
   push:
     branches: [main]
     paths:
@@ -51,14 +57,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  AWS_REGION:     ap-south-1
-  ECR_REPOSITORY: vtu-results
-  ECS_CLUSTER:    vtu-results-cluster
-  ECS_SERVICE:    vtu-results-service
-  CONTAINER_NAME: vtu-results
-  NODE_VERSION:   '20'
-  # Resolve backend URL: prefer workflow_call input, fall back to secret
-  BACKEND_URL:    ${{ inputs.backend_url || secrets.BACKEND_API_URL || 'http://localhost:8000' }}
+  AWS_REGION:      ap-south-1
+  ECR_REPOSITORY:  vtu-results
+  NODE_VERSION:    '20'
+  BACKEND_URL:     ${{ inputs.backend_url || secrets.BACKEND_API_URL || 'http://localhost:8000' }}
+  # Kustomize overlay paths for GitOps image tag update
+  GITOPS_STAGING_DIR:    frontend/gitops/overlays/staging
+  GITOPS_PRODUCTION_DIR: frontend/gitops/overlays/production
 
 defaults:
   run:
@@ -153,68 +158,103 @@ jobs:
           echo "   ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
           echo "   BACKEND_URL baked: ${{ env.BACKEND_URL }}"
 
-  # ─── Job 3: Deploy to ECS Fargate ──────────────────────────────────────────
-  deploy:
-    name: 🚀 Deploy Frontend → ECS
+  # ─── Job 3: GitOps — Update image tag → ArgoCD auto-syncs ──────────────
+  gitops-update:
+    name: 🔄 GitOps — Update Image Tag
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     needs: build-push
 
     steps:
-      - name: 🔑 Configure AWS credentials
+      - name: 📥 Checkout (with GITOPS_TOKEN for push access)
+        uses: actions/checkout@v4
+        with:
+          # Use PAT so the commit triggers other workflows
+          token: ${{ secrets.GITOPS_TOKEN || secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: 🛠️ Install Kustomize
+        uses: imranismail/setup-kustomize@v2
+        with:
+          kustomize-version: '5.3.0'
+
+      - name: 🔗 Configure AWS + ECR registry
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
 
-      - name: 🔐 Login to ECR
+      - name: 🔐 Get ECR registry URL
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: 📋 Render new ECS task definition
-        id: render-task
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition-family: ${{ env.ECS_SERVICE }}
-          container-name:         ${{ env.CONTAINER_NAME }}
-          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-
-      - name: 🚀 Rolling deploy to ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition:            ${{ steps.render-task.outputs.task-definition }}
-          service:                    ${{ env.ECS_SERVICE }}
-          cluster:                    ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-
-      - name: ❤️ Health check
+      - name: 🏷️ Update STAGING overlay image tag
+        working-directory: ${{ env.GITOPS_STAGING_DIR }}
         run: |
-          RUNNING=$(aws ecs describe-services \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }} \
-            --query 'services[0].runningCount' --output text)
-          DESIRED=$(aws ecs describe-services \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }} \
-            --query 'services[0].desiredCount' --output text)
-          echo "✅ Frontend ECS: ${RUNNING}/${DESIRED} tasks running"
-          if [ "$RUNNING" != "$DESIRED" ]; then exit 1; fi
+          ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          echo "🔗 Setting staging image to: ${ECR_IMAGE}:${{ github.sha }}"
+          kustomize edit set image vtu-results="${ECR_IMAGE}:${{ github.sha }}"
+          cat kustomization.yaml | grep newTag
 
-  # ─── Job 4: Gmail Notification (standalone runs only) ──────────────────────
+      - name: 🏷️ Update PRODUCTION overlay image tag
+        working-directory: ${{ env.GITOPS_PRODUCTION_DIR }}
+        run: |
+          ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          echo "🔗 Setting production image to: ${ECR_IMAGE}:${{ github.sha }}"
+          kustomize edit set image vtu-results="${ECR_IMAGE}:${{ github.sha }}"
+          cat kustomization.yaml | grep newTag
+
+      - name: 📤 Commit & push image tag updates
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            ${{ env.GITOPS_STAGING_DIR }}/kustomization.yaml \
+            ${{ env.GITOPS_PRODUCTION_DIR }}/kustomization.yaml
+
+          # Only commit if there are actual changes
+          if git diff --staged --quiet; then
+            echo "⚠️  No image tag changes to commit (already up to date)"
+          else
+            git commit -m "ci(gitops): update frontend image to ${{ github.sha }}
+
+- Staging:    auto-sync via ArgoCD ✅
+- Production: awaiting manual sync (argocd app sync vtu-frontend-production)
+- Commit: ${{ github.sha }}
+- Actor:  ${{ github.actor }}"
+            git push origin main
+            echo "✅ GitOps commit pushed — ArgoCD will detect and sync staging automatically"
+          fi
+
+      - name: 📊 Print ArgoCD sync instructions
+        run: |
+          echo ""
+          echo "╔═══════════════════════════════════════════════╗"
+          echo "║  GitOps Image Tag Updated!                    ║"
+          echo "║  Image: ${{ env.ECR_REPOSITORY }}:${{ github.sha }}  ║"
+          echo "║                                               ║"
+          echo "║  ✅ Staging: ArgoCD auto-syncing now           ║"
+          echo "║  ⚠️  Production: run to deploy:               ║"
+          echo "║  argocd app sync vtu-frontend-production      ║"
+          echo "╚═══════════════════════════════════════════════╝"
+          echo ""
+
+  # ─── Job 4: Gmail Notification ───────────────────────────────────────
   notify:
     name: 📧 Gmail Alert
     runs-on: ubuntu-latest
-    needs: [ci, build-push, deploy]
+    needs: [ci, build-push, gitops-update]
     if: |
       always() &&
-      github.event_name != 'workflow_call'   # Monorepo orchestrator handles notification
+      github.event_name != 'workflow_call'
 
     steps:
       - name: 📊 Compute status
         id: status
         run: |
-          if [[ "${{ needs.deploy.result }}" == "success" ]]; then
+          if [[ "${{ needs.gitops-update.result }}" == "success" ]]; then
             echo "emoji=✅"        >> $GITHUB_OUTPUT
             echo "color=#27ae60"  >> $GITHUB_OUTPUT
             echo "title=Frontend Deploy Succeeded" >> $GITHUB_OUTPUT
