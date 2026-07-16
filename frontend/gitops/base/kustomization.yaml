@@ -14,12 +14,4 @@ resources:
   - backend-deployment.yaml
   - backend-service.yaml
 
-# Image is overridden by each overlay's kustomization.yaml
-# CI updates the tag automatically via: kustomize edit set image
-images:
-  - name: vtu-results
-    newName: <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/vtu-results
-    newTag: latest
-  - name: vtu-backend
-    newName: <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/vtu-backend
-    newTag: latest
+
