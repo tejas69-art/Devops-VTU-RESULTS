@@ -195,7 +195,7 @@ jobs:
         env:
           BACKEND_CUSTOM_DOMAIN:  http://vtu-backend-svc:8000
           AWS_REGION:             ap-south-1
-          GH_TOKEN:               ${{ secrets.GITOPS_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN:               ${{ secrets.GITOPS_TOKEN }}
 
 
   # ─── Job 3: Frontend CI/CD (runs AFTER backend) ─────────────────────────────
