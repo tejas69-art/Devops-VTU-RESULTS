@@ -16,7 +16,7 @@ namespace: production
 images:
 - name: vtu-backend
   newName: 938500344509.dkr.ecr.ap-south-1.amazonaws.com/vtu-backend
-  newTag: 41a25e4da42afd546a67b03ed704b9a8db5e65b9
+  newTag: 22bcd6543d1d1f9e84667fdb775164955b7959cf
 - name: vtu-results
   newName: <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/vtu-results
   newTag: latest
