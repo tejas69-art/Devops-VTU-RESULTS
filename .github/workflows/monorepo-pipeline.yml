@@ -220,6 +220,8 @@ jobs:
       NODE_VERSION:    '20'
       GITOPS_STAGING_DIR:    frontend/gitops/overlays/staging
       GITOPS_PRODUCTION_DIR: frontend/gitops/overlays/production
+      GITOPS_STAGING_REL:    gitops/overlays/staging
+      GITOPS_PRODUCTION_REL: gitops/overlays/production
 
     steps:
       - name: 📥 Checkout
@@ -306,7 +308,7 @@ jobs:
           kustomize-version: '5.3.0'
 
       - name: 🏷️ Update STAGING overlay image tag
-        working-directory: ${{ env.GITOPS_STAGING_DIR }}
+        working-directory: ${{ github.workspace }}/${{ env.GITOPS_STAGING_DIR }}
         run: |
           ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
           echo "🔗 Setting staging image to: ${ECR_IMAGE}:${{ github.sha }}"
@@ -314,7 +316,7 @@ jobs:
           cat kustomization.yaml | grep newTag
 
       - name: 🏷️ Update PRODUCTION overlay image tag
-        working-directory: ${{ env.GITOPS_PRODUCTION_DIR }}
+        working-directory: ${{ github.workspace }}/${{ env.GITOPS_PRODUCTION_DIR }}
         run: |
           ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
           echo "🔗 Setting production image to: ${ECR_IMAGE}:${{ github.sha }}"
@@ -322,6 +324,7 @@ jobs:
           cat kustomization.yaml | grep newTag
 
       - name: 📤 Commit & push image tag updates
+        working-directory: ${{ github.workspace }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
