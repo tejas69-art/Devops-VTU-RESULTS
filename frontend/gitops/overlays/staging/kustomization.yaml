@@ -17,7 +17,7 @@ images:
   newTag: 4fe6f3d6c63f99a7515cdc93317af716d44001ad
 - name: vtu-results
   newName: 938500344509.dkr.ecr.ap-south-1.amazonaws.com/vtu-results
-  newTag: 96a766385042958a687da11079836be92a6e05e0
+  newTag: e46113fc633605d62a85fbb53135c70b06b6cb7b
 
 # ── Staging-specific patches ──────────────────────────────────────────────────
   # Scale down for cost savings in staging
