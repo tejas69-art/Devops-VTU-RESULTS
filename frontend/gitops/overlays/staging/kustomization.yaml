@@ -8,50 +8,48 @@ kind: Kustomization
 
 namespace: staging
 
-bases:
-  - ../../base
 
 # ── Image Tag (updated by CI automatically) ───────────────────────────────────
 # CI command: kustomize edit set image vtu-results=<ECR_REGISTRY>/vtu-results:<SHA>
 images:
-  - name: vtu-results
-    newName: <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/vtu-results
-    newTag: latest   # ← CI replaces this with the actual git SHA
-  - name: vtu-backend
-    newName: <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/vtu-backend
-    newTag: latest
+- name: vtu-backend
+  newName: 938500344509.dkr.ecr.ap-south-1.amazonaws.com/vtu-backend
+  newTag: e838d7c356619b113b80085c75ee7b1508f3aed2
+- name: vtu-results
+  newName: <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/vtu-results
+  newTag: latest
 
 # ── Staging-specific patches ──────────────────────────────────────────────────
-patches:
   # Scale down for cost savings in staging
-  - patch: |-
-      - op: replace
-        path: /spec/replicas
-        value: 1
-    target:
-      kind: Deployment
-      name: vtu-results
 
   # Staging HPA: min 1, max 3 replicas
-  - patch: |-
-      - op: replace
-        path: /spec/minReplicas
-        value: 1
-      - op: replace
-        path: /spec/maxReplicas
-        value: 3
-    target:
-      kind: HorizontalPodAutoscaler
-      name: vtu-results-hpa
 
   # Staging hostname
-  - patch: |-
-      - op: replace
-        path: /spec/rules/0/host
-        value: staging.vtu-results.yourdomain.com
-    target:
-      kind: Ingress
-      name: vtu-results
+patches:
+- patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 1
+  target:
+    kind: Deployment
+    name: vtu-results
+- patch: |-
+    - op: replace
+      path: /spec/minReplicas
+      value: 1
+    - op: replace
+      path: /spec/maxReplicas
+      value: 3
+  target:
+    kind: HorizontalPodAutoscaler
+    name: vtu-results-hpa
+- patch: |-
+    - op: replace
+      path: /spec/rules/0/host
+      value: staging.vtu-results.yourdomain.com
+  target:
+    kind: Ingress
+    name: vtu-results
 
 # ── Staging-specific labels ───────────────────────────────────────────────────
 commonLabels:
@@ -59,6 +57,8 @@ commonLabels:
 
 # ── Staging ConfigMap (env-specific vars) ────────────────────────────────────
 configMapGenerator:
-  - name: vtu-results-config
-    literals:
-      - NEXT_PUBLIC_APP_ENV=staging
+- literals:
+  - NEXT_PUBLIC_APP_ENV=staging
+  name: vtu-results-config
+resources:
+- ../../base
