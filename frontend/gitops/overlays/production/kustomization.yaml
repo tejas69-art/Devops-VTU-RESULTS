@@ -19,7 +19,7 @@ images:
   newTag: 4fe6f3d6c63f99a7515cdc93317af716d44001ad
 - name: vtu-results
   newName: 938500344509.dkr.ecr.ap-south-1.amazonaws.com/vtu-results
-  newTag: 7d052c1b8f197413ad631608121f1eb5986f1b64
+  newTag: 6bed1f87605b33aab422d49ce9b21a30d5182ffc
 
 # ── Production patches ────────────────────────────────────────────────────────
   # Production hostname
