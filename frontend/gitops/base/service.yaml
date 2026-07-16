@@ -17,22 +17,4 @@ spec:
       targetPort: http
       protocol: TCP
 
----
-# ServiceMonitor — tells Prometheus to scrape this Service
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: vtu-results
-  labels:
-    app: vtu-results
-    # Must match Prometheus operator's serviceMonitorSelector
-    release: kube-prometheus-stack
-spec:
-  selector:
-    matchLabels:
-      app: vtu-results
-  endpoints:
-    - port: http
-      path: /api/metrics
-      interval: 30s
-      scrapeTimeout: 10s
+
