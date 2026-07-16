@@ -14,7 +14,7 @@ namespace: staging
 images:
 - name: vtu-backend
   newName: 938500344509.dkr.ecr.ap-south-1.amazonaws.com/vtu-backend
-  newTag: 15bf452795ca27cdbda1011703bf21d33acf1d68
+  newTag: 44e99e334095782ddf8d766ff2df5d7324450fd3
 - name: vtu-results
   newName: <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/vtu-results
   newTag: latest
