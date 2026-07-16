@@ -16,8 +16,8 @@ images:
   newName: 938500344509.dkr.ecr.ap-south-1.amazonaws.com/vtu-backend
   newTag: 22bcd6543d1d1f9e84667fdb775164955b7959cf
 - name: vtu-results
-  newName: <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/vtu-results
-  newTag: latest
+  newName: 938500344509.dkr.ecr.ap-south-1.amazonaws.com/vtu-results
+  newTag: 22bcd6543d1d1f9e84667fdb775164955b7959cf
 
 # ── Staging-specific patches ──────────────────────────────────────────────────
   # Scale down for cost savings in staging
