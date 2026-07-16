@@ -35,6 +35,9 @@ concurrency:
   group: backend-pipeline-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: write
+
 env:
   AWS_REGION:      ap-south-1
   ECR_REPOSITORY:  vtu-backend

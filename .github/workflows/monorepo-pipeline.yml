@@ -37,6 +37,9 @@ concurrency:
   group: monorepo-main
   cancel-in-progress: false   # Never cancel a running deploy
 
+permissions:
+  contents: write
+
 jobs:
 
   # ─── Job 1: Detect What Changed ────────────────────────────────────────────
