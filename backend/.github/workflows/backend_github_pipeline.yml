@@ -38,9 +38,6 @@ concurrency:
 env:
   AWS_REGION:      ap-south-1
   ECR_REPOSITORY:  vtu-backend
-  ECS_CLUSTER:     vtu-results-cluster
-  ECS_SERVICE:     vtu-backend-service
-  CONTAINER_NAME:  vtu-backend
 
 jobs:
 
@@ -129,12 +126,18 @@ jobs:
 
   # ─── Job 3: Deploy to ECS Fargate ──────────────────────────────────────────
   deploy:
-    name: 🚀 Deploy Backend → ECS
+    name: 🚀 Deploy Backend → EKS
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: build-push
 
     steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITOPS_TOKEN || secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
       - name: 🔑 Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -146,46 +149,49 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: 📋 Fetch current task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition ${{ env.ECS_SERVICE }} \
-            --query taskDefinition \
-            --output json > task-definition.json
-
-      - name: 🔄 Render new task definition with updated image
-        id: render-task
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
+      - name: 🛠️ Install Kustomize
+        uses: imranismail/setup-kustomize@v2
         with:
-          task-definition: task-definition.json
-          container-name:  ${{ env.CONTAINER_NAME }}
-          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          kustomize-version: '5.3.0'
 
-      - name: 🚀 Rolling deploy to ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition:            ${{ steps.render-task.outputs.task-definition }}
-          service:                    ${{ env.ECS_SERVICE }}
-          cluster:                    ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-
-      - name: ❤️ Health Check
+      - name: 🏷️ Update STAGING overlay image tag
+        working-directory: frontend/gitops/overlays/staging
         run: |
-          RUNNING=$(aws ecs describe-services \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }} \
-            --query 'services[0].runningCount' --output text)
-          DESIRED=$(aws ecs describe-services \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }} \
-            --query 'services[0].desiredCount' --output text)
+          ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          echo "🔗 Setting staging image to: ${ECR_IMAGE}:${{ github.sha }}"
+          kustomize edit set image vtu-backend="${ECR_IMAGE}:${{ github.sha }}"
+          cat kustomization.yaml | grep newTag
 
-          echo "╔══════════════════════════════════════════╗"
-          echo "║  ✅ BACKEND DEPLOYED SUCCESSFULLY        ║"
-          echo "║  Running: $RUNNING / Desired: $DESIRED   ║"
-          echo "║  Commit : ${{ github.sha }}"
-          echo "║  Actor  : ${{ github.actor }}"
-          echo "╚══════════════════════════════════════════╝"
+      - name: 🏷️ Update PRODUCTION overlay image tag
+        working-directory: frontend/gitops/overlays/production
+        run: |
+          ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          echo "🔗 Setting production image to: ${ECR_IMAGE}:${{ github.sha }}"
+          kustomize edit set image vtu-backend="${ECR_IMAGE}:${{ github.sha }}"
+          cat kustomization.yaml | grep newTag
+
+      - name: 📤 Commit & push image tag updates
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            frontend/gitops/overlays/staging/kustomization.yaml \
+            frontend/gitops/overlays/production/kustomization.yaml
+
+          # Only commit if there are actual changes
+          if git diff --staged --quiet; then
+            echo "⚠️  No image tag changes to commit"
+          else
+            git commit -m "ci(gitops): update backend image to ${{ github.sha }}
+
+            - Staging:    auto-sync via ArgoCD ✅
+            - Production: awaiting manual sync
+            - Commit: ${{ github.sha }}
+            - Actor:  ${{ github.actor }}"
+            git push origin main
+            echo "✅ GitOps commit pushed"
+          fi
 
   # ─── Job 4: Gmail Notification (standalone runs only) ──────────────────────
   notify:

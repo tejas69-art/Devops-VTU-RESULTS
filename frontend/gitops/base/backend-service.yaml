@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vtu-backend-svc
+  labels:
+    app: vtu-backend
+spec:
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  selector:
+    app: vtu-backend
+  type: ClusterIP

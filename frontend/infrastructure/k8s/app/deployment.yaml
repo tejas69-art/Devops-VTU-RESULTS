@@ -75,6 +75,8 @@ spec:
               value: production
             - name: PORT
               value: "3000"
+            - name: VTU_API_BASE_URL
+              value: http://vtu-backend-svc:8000
           envFrom:
             - secretRef:
                 name: vtu-results-secrets  # Created via: kubectl create secret generic

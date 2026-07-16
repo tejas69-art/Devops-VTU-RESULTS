@@ -19,6 +19,9 @@ images:
   - name: vtu-results
     newName: <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/vtu-results
     newTag: latest   # ← CI replaces this with the actual git SHA
+  - name: vtu-backend
+    newName: <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/vtu-backend
+    newTag: latest
 
 # ── Production patches ────────────────────────────────────────────────────────
 patches:
