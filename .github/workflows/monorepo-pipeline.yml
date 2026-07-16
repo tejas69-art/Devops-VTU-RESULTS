@@ -382,7 +382,15 @@ jobs:
           fi
 
           # Per-service badges
-          badge() { [[ "$1" == "success" ]] && echo "✅ Deployed" || [[ "$1" == "skipped" ]] && echo "⏭️ Skipped (no changes)" || echo "❌ Failed"; }
+          badge() {
+            if [[ "$1" == "success" ]]; then
+              echo "✅ Deployed"
+            elif [[ "$1" == "skipped" ]]; then
+              echo "⏭️ Skipped (no changes)"
+            else
+              echo "❌ Failed"
+            fi
+          }
           echo "backend_badge=$(badge $BACKEND_RESULT)"   >> $GITHUB_OUTPUT
           echo "frontend_badge=$(badge $FRONTEND_RESULT)" >> $GITHUB_OUTPUT
 
