@@ -193,6 +193,7 @@ jobs:
             - Production: awaiting manual sync
             - Commit: ${{ github.sha }}
             - Actor:  ${{ github.actor }}"
+            git pull --rebase origin main
             git push origin main
             echo "✅ GitOps commit pushed"
           fi
